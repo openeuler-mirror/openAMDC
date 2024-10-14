@@ -1,0 +1,37 @@
+# example systemd template service unit file for multiple openamdc-servers
+#
+# You can use this file as a blueprint for your actual template service unit
+# file, if you intend to run multiple independent openamdc-server instances in
+# parallel using systemd's "template unit files" feature. If you do, you will
+# want to choose a better basename for your service unit by renaming this file
+# when copying it.
+#
+# Please take a look at the provided "systemd-openamdc.service" example
+# service unit file, too, if you choose to use this approach at managing
+# multiple openamdc-server instances via systemd.
+
+[Unit]
+Description=openAMDC data structure server - instance %i
+Documentation=https://gitee.com/openamdc
+# This template unit assumes your openamdc-server configuration file(s)
+# to live at /etc/openamdc/openamdc_server_<INSTANCE_NAME>.conf
+AssertPathExists=/etc/openamdc/openamdc_server_%i.conf
+#Before=your_application.service another_example_application.service
+#AssertPathExists=/var/lib/openamdc
+
+[Service]
+ExecStart=/usr/local/bin/openamdc-server /etc/openamdc/openamdc_server_%i.conf
+LimitNOFILE=10032
+NoNewPrivileges=yes
+#OOMScoreAdjust=-900
+#PrivateTmp=yes
+Type=notify
+TimeoutStartSec=infinity
+TimeoutStopSec=infinity
+UMask=0077
+#User=openamdc
+#Group=openamdc
+#WorkingDirectory=/var/lib/openamdc
+
+[Install]
+WantedBy=multi-user.target
