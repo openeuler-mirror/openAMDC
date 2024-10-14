@@ -409,7 +409,7 @@ static void resetClient(client c) {
     aeEventLoop *el = CLIENT_GET_EVENTLOOP(c);
     aeDeleteFileEvent(el,c->context->fd,AE_WRITABLE);
     aeDeleteFileEvent(el,c->context->fd,AE_READABLE);
-    aeCreateFileEvent(el,c->context->fd,AE_WRITABLE,writeHandler,c);
+    aeCreateFileEvent(el,c->context->fd,AE_WRITABLE|AE_WRITE_THREADSAFE,writeHandler,c);
     c->written = 0;
     c->pending = config.pipeline;
 }
@@ -634,7 +634,7 @@ static void writeHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
                 }
             } else {
                 aeDeleteFileEvent(el,c->context->fd,AE_WRITABLE);
-                aeCreateFileEvent(el,c->context->fd,AE_READABLE,readHandler,c);
+                aeCreateFileEvent(el,c->context->fd,AE_READABLE|AE_READ_THREADSAFE,readHandler,c);
                 return;
             }
         }
@@ -831,7 +831,7 @@ static client createClient(char *cmd, size_t len, client from, int thread_id) {
         el = thread->el;
     }
     if (config.idlemode == 0)
-        aeCreateFileEvent(el,c->context->fd,AE_WRITABLE,writeHandler,c);
+        aeCreateFileEvent(el,c->context->fd,AE_WRITABLE|AE_WRITE_THREADSAFE,writeHandler,c);
     listAddNodeTail(config.clients,c);
     atomicIncr(config.liveclients, 1);
     atomicGet(config.slots_last_update, c->slots_last_update);
