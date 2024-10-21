@@ -2444,7 +2444,6 @@ int migrateGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResul
 int georadiusGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
 int xreadGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
 int memoryGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
-int lcsGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
 
 /* Cluster */
 void clusterInit(void);
@@ -2744,7 +2743,7 @@ void xdelCommand(client *c);
 void xtrimCommand(client *c);
 void lolwutCommand(client *c);
 void aclCommand(client *c);
-void stralgoCommand(client *c);
+void lcsCommand(client *c);
 void resetCommand(client *c);
 void failoverCommand(client *c);
 

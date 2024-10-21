@@ -1083,9 +1083,9 @@ struct redisCommand redisCommandTable[] = {
      "admin no-script ok-loading ok-stale",
      0,NULL,0,0,0,0,0,0},
 
-    {"stralgo",stralgoCommand,-2,
+    {"lcs",lcsCommand,-3,
      "read-only @string",
-     0,lcsGetKeys,0,0,0,0,0,0},
+     0,NULL,1,2,1,0,0,0},
 
     {"reset",resetCommand,1,
      "no-script ok-stale ok-loading fast @connection",
