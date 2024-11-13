@@ -1836,7 +1836,7 @@ void parsedRelease(void *ptr);
 /* networking.c -- Networking and Client related operations */
 client *createClient(connection *conn, int iel);
 void closeTimedoutClients(void);
-int freeClient(client *c);
+void freeClient(client *c);
 void freeClientAsync(client *c);
 void resetClient(client *c);
 void freeClientOriginalArgv(client *c);
@@ -2802,5 +2802,6 @@ int tlsConfigure(redisTLSContextConfig *ctx_config);
 int iAmMaster(void);
 void aeClosePipes(aeEventLoop *eventLoop);
 int threadOwnLock();
+int skipLock();
 
 #endif

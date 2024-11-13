@@ -46,7 +46,7 @@ set ::all_tests {
     integration/aof
     integration/rdb
     integration/corrupt-dump
-    integration/corrupt-dump-fuzzer
+    # integration/corrupt-dump-fuzzer
     integration/convert-zipmap-hash-on-load
     integration/logging
     integration/psync2

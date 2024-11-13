@@ -1718,7 +1718,8 @@ int memtest_test_linux_anonymous_maps(void) {
 static void killMainAndWorkerThreads(void) {
     int err;
     for (int iel = 0; iel < MAX_THREAD_VAR; iel++) {
-        if (iel < server.worker_threads_num || iel == MODULE_THREAD_ID) {
+        if (iel < server.worker_threads_num || 
+            (iel == MODULE_THREAD_ID && server.worker_threads_num > 1)) {
             if (server.thread[iel] != pthread_self()) {
                 pthread_cancel(server.thread[iel]);
             }

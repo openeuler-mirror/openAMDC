@@ -1823,7 +1823,7 @@ void clientsCron(int iel) {
         head = listFirst(server.clients);
         c = listNodeValue(head);
         if (c->iel == iel) {
-            mutexLock(&c->lock);
+            WRAPPER_MUTEX_NOCLEANUP_LOCK(cl, &c->lock);
             /* The following functions do different service checks on the client.
             * The protocol is that they return non-zero if the client was
             * terminated. */
@@ -1833,7 +1833,7 @@ void clientsCron(int iel) {
             if (clientsCronTrackClientsMemUsage(c)) goto unlock;
             if (closeClientOnOutputBufferLimitReached(c, 0)) continue;
         unlock:
-            mutexUnlock(&c->lock);
+            wrapperMutexUnlock(&cl);
         }
     }
 
@@ -2037,9 +2037,10 @@ void asyncHandleClientsWithPendingWrites(void *var) {
     /* Install a write handler for the client to manage future write events */
     clientInstallWriteHandler(c);
     /* Process the pending write tasks for the current thread */
-    mutexUnlock(&c->lock);
+    WRAPPER_MUTEX_NOCLEANUP_DEFINE(cl, &c->lock);
+    wrapperMutexUnlock(&cl);
     handleClientsWithPendingWrites(c->iel);
-    mutexLock(&c->lock);
+    wrapperMutexLock(&cl);
 }
 
 /*
@@ -2825,7 +2826,7 @@ void initServerConfig(void) {
     server.repl_backlog_idx = 0;
     server.repl_backlog_off = 0;
     server.repl_no_slaves_since = time(NULL);
-    mutexInit(&replBacklogLock, "repl backlog lock");
+    mutexInit(&replBacklogLock, skipLock, "repl backlog lock");
 
     /* Failover related */
     server.failover_end_time = 0;
@@ -3431,7 +3432,8 @@ void initServer(void) {
     server.worker_threads_num =  server.worker_threads_num == 0 ? 1 : server.worker_threads_num;
 
     for (int iel = 0; iel < MAX_THREAD_VAR; iel++) {
-        if (iel < server.worker_threads_num || iel == MODULE_THREAD_ID) {
+        if (iel < server.worker_threads_num || 
+            (iel == MODULE_THREAD_ID && server.worker_threads_num > 1)) {
             server.unblocked_clients[iel] = listCreate();
             server.pending_write_list[iel] = listCreate();
             server.client_handling_list[iel] = listCreate();
@@ -3457,7 +3459,7 @@ void initServer(void) {
             }
             aeSetBeforeSleepProc(server.el[iel], beforeSleep);
             aeSetAfterSleepProc(server.el[iel], afterSleep);
-            mutexInit(&server.pending_write_lock[iel], "pending write lock");
+            mutexInit(&server.pending_write_lock[iel], skipLock, "pending write lock");
 
             /* Create the timer callback, this is our way to process many background
              * operations incrementally, like clients timeout, eviction of unaccessed
@@ -4606,7 +4608,8 @@ int prepareForShutdown(int flags) {
      * calls aeAsyncFunction with asyncAeEventStop, passing the current thread
      * index as an argument. */
     for (int iel = 0; iel < MAX_THREAD_VAR; iel++) {
-        if (iel < server.worker_threads_num || iel == MODULE_THREAD_ID) {
+        if (iel < server.worker_threads_num || 
+            (iel == MODULE_THREAD_ID && server.worker_threads_num > 1)) {
             void *var = (void*)((int64_t)iel);
             aeAsyncFunction(server.el[iel], asyncAeEventStop, var, NULL, 1);
         }
@@ -6091,7 +6094,8 @@ void closeChildUnusedResourceAfterFork() {
     if (server.cluster_enabled && server.cluster_config_file_lock_fd != -1)
         close(server.cluster_config_file_lock_fd);  /* don't care if this fails */
     for (int iel = 0; iel < MAX_THREAD_VAR; iel++) {
-        if (iel < server.worker_threads_num || iel == MODULE_THREAD_ID)
+        if (iel < server.worker_threads_num || 
+            (iel == MODULE_THREAD_ID && server.worker_threads_num > 1))
             aeClosePipes(server.el[iel]);
     }
 
@@ -6382,7 +6386,12 @@ int iAmMaster(void) {
 }
 
 int threadOwnLock() {
-    return mutexOwnLock(&globalLock);
+    WRAPPER_MUTEX_NOCLEANUP_DEFINE(wl, &globalLock);
+    return wrapperMutexOwnLock(&wl);
+}
+
+int skipLock() {
+    return server.worker_threads_num == 1;
 }
 
 #ifdef REDIS_TEST
@@ -6459,9 +6468,6 @@ int main(int argc, char **argv) {
         return 0;
     }
 #endif
-    /* Init lock */
-    mutexInit(&globalLock, "global lock");
-    mutexLock(&globalLock);
 
     /* We need to initialize our libraries, and the server configuration. */
 #ifdef INIT_SETPROCTITLE_REPLACEMENT
@@ -6597,6 +6603,10 @@ int main(int argc, char **argv) {
     readOOMScoreAdj();
     initServer();
    
+    /* Init lock */
+    mutexInit(&globalLock, skipLock, "global lock");
+    WRAPPER_MUTEX_NOCLEANUP_LOCK(wl, &globalLock);
+
     if (background || server.pidfile) createPidFile();
     if (server.set_proc_title) redisSetProcTitle(NULL);
     redisAsciiArt();
@@ -6667,16 +6677,17 @@ int main(int argc, char **argv) {
 
     redisSetCpuAffinity(server.server_cpulist);
     setOOMScoreAdj(-1);
-    mutexUnlock(&globalLock);
+    wrapperMutexUnlock(&wl);
     moduleReleaseGIL();
 
     pthread_attr_t tattr;
     pthread_attr_init(&tattr);
     pthread_attr_setstacksize(&tattr, 1 << 23);
-    pthread_create(server.thread + MODULE_THREAD_ID, &tattr, moduleThread, (void *)((int64_t)MODULE_THREAD_ID));
     for (int iel = 0; iel < server.worker_threads_num; ++iel) {
         pthread_create(server.thread + iel, &tattr, workerThread, (void *)((int64_t)iel));
     }
+    if (server.worker_threads_num > 1)
+        pthread_create(server.thread + MODULE_THREAD_ID, &tattr, moduleThread, (void *)((int64_t)MODULE_THREAD_ID));
 
     /* Block SIGALRM from this thread, it should only be received on a worker thread */
     sigset_t sigset;
@@ -6685,10 +6696,10 @@ int main(int argc, char **argv) {
     pthread_sigmask(SIG_BLOCK, &sigset, NULL);
 
     /* The worker/module thread sleeps until all the workers are done. */
-    pthread_join(server.thread[MODULE_THREAD_ID], NULL);
     for (int iel = 0; iel < server.worker_threads_num; ++iel)
         pthread_join(server.thread[iel], NULL);
-
+    if (server.worker_threads_num > 1)
+        pthread_join(server.thread[MODULE_THREAD_ID], NULL);
     return 0;
 }
 
