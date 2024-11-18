@@ -589,14 +589,13 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
     }
     inuse++;
     
-    mutexLock(&c->lock);
+    WRAPPER_MUTEX_LOCK(wl, &c->lock);
 
     /* Require at least one argument */
     if (argc == 0) {
         luaPushError(lua,
             "Please specify at least one argument for redis.call()");
         inuse--;
-        mutexUnlock(&c->lock);
         return raise_error ? luaRaiseError(lua) : 1;
     }
 
@@ -916,11 +915,9 @@ cleanup:
          * form of a table with an "err" field. Extract the string to
          * return the plain error. */
         inuse--;
-        mutexUnlock(&c->lock);
         return luaRaiseError(lua);
     }
     inuse--;
-    mutexUnlock(&c->lock);
     return 1;
 }
 

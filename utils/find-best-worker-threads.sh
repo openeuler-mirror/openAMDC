@@ -1,6 +1,6 @@
 #!/bin/bash
 
-HOST=localhost
+HOST=127.0.0.1
 PORT=6379
 CLIENTS=50
 REQUESTS=5000
@@ -73,7 +73,7 @@ while [ $THREAD -le $MAXTHREADS ]; do
         echo "Failed to start openamdc server. Exiting."
         exit 1
     else
-        echo "OpenAMDC server is already running, ../src/openamdc-server --port $PORT --worker-threads $THREAD > /dev/null 2> /dev/null &."
+        echo "OpenAMDC server is already running, ../src/openamdc-server --bind $HOST --port $PORT --worker-threads $THREAD > /dev/null 2> /dev/null &."
     fi
 
     echo "Starting benchmark, $benchmark -s $HOST -p $PORT -t $THREAD -c $CLIENTS -n $REQUESTS --hide-histogram --distinct-client-seed --command="set __key__ __data__" --key-prefix="kv_" --key-minimum=1 --key-maximum=10000 -R -d 128"

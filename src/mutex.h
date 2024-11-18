@@ -17,15 +17,18 @@
 #include <errno.h>
 #include <pthread.h>
 
+typedef int (mutexSkipLock)();
+
 struct mutex {
     char *name;
     int depth;
     pthread_t owner;
     pthread_mutexattr_t attr;
     pthread_mutex_t mutex;
+    mutexSkipLock *skipLock;
 };
 
-int mutexInit(struct mutex *m, char *name);
+int mutexInit(struct mutex *m, mutexSkipLock *skipLock, char *name);
 int mutexLock(struct mutex *m);
 int mutexTryLock(struct mutex *m);
 int mutexUnlock(struct mutex *m);
@@ -37,11 +40,20 @@ struct wrapperMutex {
     int depth;
 };
 
-#define WRAPPER_MUTEX_DEFINE(v) __attribute__((__cleanup__(wrapperMutexUnlock))) struct wrapperMutex (v) = {.lock = NULL, .depth = 0}
-#define WRAPPER_MUTEX_DEFER_LOCK(v, l) __attribute__((__cleanup__(wrapperMutexUnlock))) struct wrapperMutex (v) = {.lock = (l), .depth = 0}
-#define WRAPPER_MUTEX_LOCK(v, l)                                                                         \
-    __attribute__((__cleanup__(wrapperMutexUnlock))) struct wrapperMutex (v) = {.lock = (l), .depth = 0}; \
-    wrapperMutexLock(&(v))
+#define WRAPPER_MUTEX_DEFINE(v) \
+    __attribute__((__cleanup__(wrapperMutexUnlock))) struct wrapperMutex (v) = {.lock = NULL, .depth = 0}
+
+#define WRAPPER_MUTEX_DEFER_LOCK(v, l) \
+    __attribute__((__cleanup__(wrapperMutexUnlock))) struct wrapperMutex (v) = {.lock = (l), .depth = 0}
+
+#define WRAPPER_MUTEX_LOCK(v, l) \
+    __attribute__((__cleanup__(wrapperMutexUnlock))) struct wrapperMutex (v) = {.lock = (l), .depth = 0}; wrapperMutexLock(&(v))
+
+#define WRAPPER_MUTEX_NOCLEANUP_LOCK(v, l) \
+    struct wrapperMutex (v) = {.lock = (l), .depth = 0}; wrapperMutexLock(&(v))
+
+#define WRAPPER_MUTEX_NOCLEANUP_DEFINE(v, l) \
+    struct wrapperMutex (v) = {.lock = (l), .depth = 1};
 
 int wrapperMutexLock(struct wrapperMutex *wm);
 int wrapperMutexTryLock(struct wrapperMutex *wm);

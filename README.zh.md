@@ -1,7 +1,7 @@
 什么是openAMDC?
 --------------
 
-openAMDC是一个开源且高性能的键值内存数据库，作为一个Redis分支其兼容所有Redis命令、协议以及数据结构，可以轻松使用openAMDC来替换已有的Redis服务。openAMDC架构如下：
+openAMDC是一个开源且高性能的键值内存数据库，兼容所有Redis命令、协议以及数据结构，可以轻松使用openAMDC来替换已有的Redis服务。openAMDC架构如下：
 
 <br/>
 <div align="center">
@@ -178,7 +178,7 @@ redis.conf中的所有选项也都可以作为命令行选项，名称完全相�
 您可以使用openamdc-cli来与openAMDC互动。启动一个openamdc-server实例，然后在另一个终端尝试以下操作：
 
     % cd src
-    % ./oepnamdc-cli
+    % ./openamdc-cli
     openamdc> ping
     PONG
     openamdc> set foo bar
@@ -210,13 +210,13 @@ redis.conf中的所有选项也都可以作为命令行选项，名称完全相�
 
 该脚本会问你几个问题，并将设置好您需要的一切，以便将openAMDC正确地作为一个后台守护进程运行，该进程会在系统重启时再次启动。
 
-您将能够使用名为/etc/init.d/openamdc_<portnumber>的脚本停止和启动openAMDC，例如/etc/init.d/oepnamdc_6379。
+您将能够使用名为/etc/init.d/openamdc_<portnumber>的脚本停止和启动openAMDC，例如/etc/init.d/openamdc_6379。
 
 代码贡献
 -------
 
-注意：通过Gitee发送拉取请求向openAMDC项目贡献代码，即表示您同意根据在openAMDC源代码分发中包含的COPYING文件中可找到的BSD许可
-条款发布您的代码。您将在您所贡献的每个源代码文件内的COPYING文件中包含BSD许可。
+注意：通过Gitee发送拉取请求向openAMDC项目贡献代码，即表示您同意根据在openAMDC源代码分发中包含的COPYING文件中可找到的MulanPSLv2许可
+条款发布您的代码。您将在您所贡献的每个源代码文件内的COPYING文件中包含MulanPSLv2许可。
 
 1. 如果这是一个重要的特性或语义上的改变，请在Gitee上创建一个[问题](.github/ISSUE_TEMPLATE/feature_request.md)，准确地描述你想要实现的内容以及原因,用例对于特性被接受很重要。
 

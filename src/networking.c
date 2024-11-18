@@ -127,7 +127,7 @@ client *createClient(connection *conn, int iel) {
     c->resp = 2;
     c->iel = iel;
     c->conn = conn;
-    mutexInit(&c->lock, "client lock");
+    mutexInit(&c->lock, skipLock, "client lock");
     c->name = NULL;
     c->bufpos = 0;
     c->qb_pos = 0;
@@ -369,8 +369,9 @@ void clientInstallWriteHandler(client *c) {
          * loop, we can try to directly write to the client sockets avoiding
          * a system call. We'll only really install the write handler if
          * we'll not be able to write the whole reply at once. */
+        WRAPPER_MUTEX_NOCLEANUP_DEFINE(cl, &c->lock);
+        serverAssert(wrapperMutexOwnLock(&cl));
         serverAssert(clientCheckThreadAligned(c));
-        serverAssert(mutexOwnLock(&c->lock));
         c->flags |= CLIENT_PENDING_WRITE;
         WRAPPER_MUTEX_LOCK(pwl, &server.pending_write_lock[c->iel]);
         listAddNodeHead(server.pending_write_list[c->iel],c);
@@ -413,7 +414,8 @@ int prepareClientToWrite(client *c) {
     if (async) {
         serverAssert(threadOwnLock());
     } else {
-        serverAssert(c->conn == NULL || mutexOwnLock(&c->lock));
+        WRAPPER_MUTEX_NOCLEANUP_DEFINE(cl, &c->lock);
+        serverAssert(c->conn == NULL || wrapperMutexOwnLock(&cl));
     }
 
     /* If it's the Lua client we always return ok without installing any
@@ -1515,9 +1517,10 @@ int anyOtherSlaveWaitRdb(client *except_me) {
  * be referenced, not including the Pub/Sub channels.
  * This is used by freeClient() and replicationCacheMaster(). */
 void unlinkClient(client *c) {
+    WRAPPER_MUTEX_NOCLEANUP_DEFINE(cl, &c->lock);
     serverAssert(clientCheckThreadAligned(c));
     serverAssert(c->conn == NULL || threadOwnLock());
-    serverAssert(c->conn == NULL || mutexOwnLock(&c->lock));
+    serverAssert(c->conn == NULL || wrapperMutexOwnLock(&cl));
 
     listIter li;
     listNode *ln;
@@ -1579,7 +1582,8 @@ void unlinkClient(client *c) {
         ln = NULL;
         int found = 0;
         for (int iel = 0; iel < MAX_THREAD_VAR; ++iel) {
-            if (iel < server.worker_threads_num || iel == MODULE_THREAD_ID) {
+            if (iel < server.worker_threads_num || 
+                (iel == MODULE_THREAD_ID && server.worker_threads_num > 1)) {
                 ln = listSearchKey(server.async_pending_write_list[iel], c);
                 if (ln) {
                     found = 1;
@@ -1603,18 +1607,17 @@ void unlinkClient(client *c) {
     if (c->flags & CLIENT_TRACKING) disableTracking(c);
 }
 
-int freeClient(client *c) {
+void freeClient(client *c) {
     serverAssert(c->conn == NULL || threadOwnLock());
     serverAssert(clientCheckThreadAligned(c));
-    mutexLock(&c->lock);
+    WRAPPER_MUTEX_LOCK(wl, &c->lock);
     listNode *ln;
 
     /* If a client is protected, yet we need to free it right now, make sure
      * to at least use asynchronous freeing. */
     if (c->flags & CLIENT_PROTECTED || c->async_ops) {
         freeClientAsync(c);
-        mutexUnlock(&c->lock);
-        return 0;
+        return;
     }
 
     /* For connected clients, call the disconnection event of modules hooks. */
@@ -1648,8 +1651,7 @@ int freeClient(client *c) {
         if (!(c->flags & (CLIENT_PROTOCOL_ERROR|CLIENT_BLOCKED))) {
             c->flags &= ~(CLIENT_CLOSE_ASAP|CLIENT_CLOSE_AFTER_REPLY);
             replicationCacheMaster(c);
-            mutexUnlock(&c->lock);
-            return 0;
+            return;
         }
     }
 
@@ -1747,10 +1749,9 @@ int freeClient(client *c) {
     sdsfree(c->peerid);
     sdsfree(c->sockname);
     sdsfree(c->slave_addr);
-    mutexUnlock(&c->lock);
+    wrapperMutexUnlock(&wl);
     mutexDestroy(&c->lock);
     zfree(c);
-    return 1;
 }
 
 /* Schedule a client to free it at a safe time in the serverCron() function.
@@ -3837,16 +3838,15 @@ void processEventsWhileBlocked(int iel) {
     listRewind(server.clients, &li);
     while((ln = listNext(&li)) != NULL) {
         client *c = listNodeValue(ln);
-        if (mutexOwnLock(&c->lock)) {
-            serverAssert(c->flags & CLIENT_PROTECTED ||
-                c->flags & CLIENT_INPROGRESS_COMMAND);
-            mutexUnlock(&c->lock);
+        WRAPPER_MUTEX_NOCLEANUP_DEFINE(cl, &c->lock);
+        if (wrapperMutexOwnLock(&cl)) {
+            wrapperMutexUnlock(&cl);
             listAddNodeTail(clients, c);
         }
     }
 
-    mutexUnlock(&globalLock);
-    serverAssert(!threadOwnLock());
+    WRAPPER_MUTEX_NOCLEANUP_DEFINE(wl, &globalLock);
+    wrapperMutexUnlock(&wl);
 
     {
         int iterations = 4; /* See the function top-comment. */
@@ -3877,12 +3877,11 @@ void processEventsWhileBlocked(int iel) {
         ProcessingEventsWhileBlocked = 0;
     }
 
-    struct wrapperMutex wm = {&globalLock};
-    wrapperMutexLock(&wm);
+    WRAPPER_MUTEX_NOCLEANUP_LOCK(gl, &globalLock);
     listRewind(clients, &li);
     while((ln = listNext(&li)) != NULL) {
         client *c = listNodeValue(ln);
-        mutexLock(&c->lock);
+        WRAPPER_MUTEX_NOCLEANUP_LOCK(cl, &c->lock);
     }
     listRelease(clients);
 }

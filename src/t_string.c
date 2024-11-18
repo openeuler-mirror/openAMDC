@@ -387,12 +387,9 @@ void getexCommand(client *c) {
 
 void getdelCommand(client *c) {
     if (getGenericCommand(c) == C_ERR) return;
-    int deleted = server.lazyfree_lazy_user_del ? dbAsyncDelete(c->db, c->argv[1]) :
-                  dbSyncDelete(c->db, c->argv[1]);
-    if (deleted) {
-        /* Propagate as DEL/UNLINK command */
-        robj *aux = server.lazyfree_lazy_user_del ? shared.unlink : shared.del;
-        rewriteClientCommandVector(c,2,aux,c->argv[1]);
+    if (dbSyncDelete(c->db, c->argv[1])) {
+        /* Propagate as DEL command */
+        rewriteClientCommandVector(c,2,shared.del,c->argv[1]);
         signalModifiedKey(c, c->db, c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_GENERIC, "del", c->argv[1], c->db->id);
         server.dirty++;
@@ -598,9 +595,7 @@ void incrDecrCommand(client *c, long long incr) {
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_STRING,"incrby",c->argv[1],c->db->id);
     server.dirty++;
-    addReply(c,shared.colon);
-    addReply(c,new);
-    addReply(c,shared.crlf);
+    addReplyLongLong(c, value);
 }
 
 void incrCommand(client *c) {
@@ -622,6 +617,11 @@ void decrbyCommand(client *c) {
     long long incr;
 
     if (getLongLongFromObjectOrReply(c, c->argv[2], &incr, NULL) != C_OK) return;
+    /* Overflow check: negating LLONG_MIN will cause an overflow */
+    if (incr == LLONG_MIN) {
+        addReplyError(c, "decrement would overflow");
+        return;
+    }
     incrDecrCommand(c,-incr);
 }
 
@@ -697,31 +697,33 @@ void strlenCommand(client *c) {
     addReplyLongLong(c,stringObjectLen(o));
 }
 
-
-/* STRALGO -- Implement complex algorithms on strings.
- *
- * STRALGO <algorithm> ... arguments ... */
-void stralgoLCS(client *c);     /* This implements the LCS algorithm. */
-void stralgoCommand(client *c) {
-    /* Select the algorithm. */
-    if (!strcasecmp(c->argv[1]->ptr,"lcs")) {
-        stralgoLCS(c);
-    } else {
-        addReplyErrorObject(c,shared.syntaxerr);
-    }
-}
-
-/* STRALGO <algo> [IDX] [LEN] [MINMATCHLEN <len>] [WITHMATCHLEN]
- *     STRINGS <string> <string> | KEYS <keya> <keyb>
- */
-void stralgoLCS(client *c) {
+/* LCS key1 key2 [LEN] [IDX] [MINMATCHLEN <len>] [WITHMATCHLEN] */
+void lcsCommand(client *c) {
     uint32_t i, j;
     long long minmatchlen = 0;
     sds a = NULL, b = NULL;
     int getlen = 0, getidx = 0, withmatchlen = 0;
     robj *obja = NULL, *objb = NULL;
 
-    for (j = 2; j < (uint32_t)c->argc; j++) {
+    obja = lookupKeyRead(c->db,c->argv[1]);
+    objb = lookupKeyRead(c->db,c->argv[2]);
+    if ((obja && obja->type != OBJ_STRING) ||
+        (objb && objb->type != OBJ_STRING))
+    {
+        addReplyError(c,
+            "The specified keys must contain string values");
+        /* Don't cleanup the objects, we need to do that
+         * only after calling getDecodedObject(). */
+        obja = NULL;
+        objb = NULL;
+        goto cleanup;
+    }
+    obja = obja ? getDecodedObject(obja) : createStringObject("",0);
+    objb = objb ? getDecodedObject(objb) : createStringObject("",0);
+    a = obja->ptr;
+    b = objb->ptr;
+
+    for (j = 3; j < (uint32_t)c->argc; j++) {
         char *opt = c->argv[j]->ptr;
         int moreargs = (c->argc-1) - j;
 
@@ -736,37 +738,6 @@ void stralgoLCS(client *c) {
                 != C_OK) goto cleanup;
             if (minmatchlen < 0) minmatchlen = 0;
             j++;
-        } else if (!strcasecmp(opt,"STRINGS") && moreargs > 1) {
-            if (a != NULL) {
-                addReplyError(c,"Either use STRINGS or KEYS");
-                goto cleanup;
-            }
-            a = c->argv[j+1]->ptr;
-            b = c->argv[j+2]->ptr;
-            j += 2;
-        } else if (!strcasecmp(opt,"KEYS") && moreargs > 1) {
-            if (a != NULL) {
-                addReplyError(c,"Either use STRINGS or KEYS");
-                goto cleanup;
-            }
-            obja = lookupKeyRead(c->db,c->argv[j+1]);
-            objb = lookupKeyRead(c->db,c->argv[j+2]);
-            if ((obja && obja->type != OBJ_STRING) ||
-                (objb && objb->type != OBJ_STRING))
-            {
-                addReplyError(c,
-                    "The specified keys must contain string values");
-                /* Don't cleanup the objects, we need to do that
-                 * only after calling getDecodedObject(). */
-                obja = NULL;
-                objb = NULL;
-                goto cleanup;
-            }
-            obja = obja ? getDecodedObject(obja) : createStringObject("",0);
-            objb = objb ? getDecodedObject(objb) : createStringObject("",0);
-            a = obja->ptr;
-            b = objb->ptr;
-            j += 2;
         } else {
             addReplyErrorObject(c,shared.syntaxerr);
             goto cleanup;
@@ -774,14 +745,9 @@ void stralgoLCS(client *c) {
     }
 
     /* Complain if the user passed ambiguous parameters. */
-    if (a == NULL) {
-        addReplyError(c,"Please specify two strings: "
-                        "STRINGS or KEYS options are mandatory");
-        goto cleanup;
-    } else if (getlen && getidx) {
+    if (getlen && getidx) {
         addReplyError(c,
-            "If you want both the length and indexes, please "
-            "just use IDX.");
+            "If you want both the length and indexes, please just use IDX.");
         goto cleanup;
     }
 
@@ -798,17 +764,22 @@ void stralgoLCS(client *c) {
 
     /* Setup an uint32_t array to store at LCS[i,j] the length of the
      * LCS A0..i-1, B0..j-1. Note that we have a linear array here, so
-     * we index it as LCS[j+(blen+1)*j] */
+     * we index it as LCS[j+(blen+1)*i] */
     #define LCS(A,B) lcs[(B)+((A)*(blen+1))]
 
     /* Try to allocate the LCS table, and abort on overflow or insufficient memory. */
     unsigned long long lcssize = (unsigned long long)(alen+1)*(blen+1); /* Can't overflow due to the size limits above. */
     unsigned long long lcsalloc = lcssize * sizeof(uint32_t);
     uint32_t *lcs = NULL;
-    if (lcsalloc < SIZE_MAX && lcsalloc / lcssize == sizeof(uint32_t))
+    if (lcsalloc < SIZE_MAX && lcsalloc / lcssize == sizeof(uint32_t)) {
+        if (lcsalloc > (size_t)server.proto_max_bulk_len) {
+            addReplyError(c, "Insufficient memory, transient memory for LCS exceeds proto-max-bulk-len");
+            goto cleanup;
+        }
         lcs = ztrymalloc(lcsalloc);
+    }
     if (!lcs) {
-        addReplyError(c, "Insufficient memory");
+        addReplyError(c, "Insufficient memory, failed allocating transient memory for LCS");
         goto cleanup;
     }
 
@@ -840,7 +811,7 @@ void stralgoLCS(client *c) {
      * it backward, but the length is already known, we store it into idx. */
     uint32_t idx = LCS(alen,blen);
     sds result = NULL;        /* Resulting LCS string. */
-    void *arraylenptr = NULL; /* Deffered length of the array for IDX. */
+    void *arraylenptr = NULL; /* Deferred length of the array for IDX. */
     uint32_t arange_start = alen, /* alen signals that values are not set. */
              arange_end = 0,
              brange_start = 0,

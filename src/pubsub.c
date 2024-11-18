@@ -134,8 +134,9 @@ int clientSubscriptionsCount(client *c) {
 /* Subscribe a client to a channel. Returns 1 if the operation succeeded, or
  * 0 if the client was already subscribed to that channel. */
 int pubsubSubscribeChannel(client *c, robj *channel) {
+    WRAPPER_MUTEX_NOCLEANUP_DEFINE(cl, &c->lock);
     serverAssert(threadOwnLock());
-    serverAssert(mutexOwnLock(&c->lock));
+    serverAssert(wrapperMutexOwnLock(&cl));
     dictEntry *de;
     list *clients = NULL;
     int retval = 0;
