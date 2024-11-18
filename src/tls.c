@@ -1035,7 +1035,6 @@ int tlsHasPendingData() {
 }
 
 int tlsProcessPendingData() {
-    serverAssert(!threadOwnLock());
     listIter li;
     listNode *ln;
 

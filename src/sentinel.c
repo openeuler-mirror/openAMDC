@@ -874,10 +874,12 @@ void sentinelRunPendingScripts(void) {
         } else if (pid == 0) {
             /* Child */
             tlsCleanup();
-            for (int iel = 0; iel < server.worker_threads_num; iel++) {
-                aeClosePipes(server.el[iel]);
+            for (int iel = 0; iel < MAX_THREAD_VAR; iel++) {
+                if (iel < server.worker_threads_num || 
+                (iel == MODULE_THREAD_ID && server.worker_threads_num > 1)) {
+                    aeClosePipes(server.el[iel]);
+                }   
             }
-            aeClosePipes(server.el[MODULE_THREAD_ID]);
             execve(sj->argv[0],sj->argv,environ);
             /* If we are here an error occurred. */
             _exit(2); /* Don't retry execution. */

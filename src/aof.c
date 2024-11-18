@@ -718,7 +718,7 @@ struct client *createAOFClient(void) {
     c->sockname = NULL;
     c->resp = 2;
     c->user = NULL;
-    mutexInit(&c->lock, "fake client");
+    mutexInit(&c->lock, skipLock, "fake client");
     listSetFreeMethod(c->reply,freeClientReplyValue);
     listSetDupMethod(c->reply,dupClientReplyValue);
     initClientMultiState(c);

@@ -1674,7 +1674,7 @@ int main(int argc, const char **argv) {
 
     client c;
 
-    mutexInit(&globalLock, "global lock");
+    mutexInit(&globalLock, NULL, "global lock");
     srandom(time(NULL) ^ getpid());
     init_genrand64(ustime() ^ getpid());
     signal(SIGHUP, SIG_IGN);

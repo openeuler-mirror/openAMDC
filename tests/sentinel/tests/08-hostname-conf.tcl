@@ -1,3 +1,5 @@
+source "../tests/includes/init-tests.tcl"
+
 proc set_redis_announce_ip {addr} {
     foreach_redis_id id {
         R $id config set replica-announce-ip $addr
@@ -27,8 +29,6 @@ test "(pre-init) Configure instances and sentinel for hostname use" {
     set_sentinel_config resolve-hostnames yes
     set_sentinel_config announce-hostnames yes
 }
-
-source "../tests/includes/init-tests.tcl"
 
 proc verify_hostname_announced {hostname} {
     foreach_sentinel_id id {

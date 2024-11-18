@@ -13,11 +13,12 @@
 #include "mutex.h"
 
 /* Initializes a mutex structure with specified attributes */
-int mutexInit(struct mutex *m, char *name) {
+int mutexInit(struct mutex *m, mutexSkipLock *skipLock, char *name) {
     int ret = 0;
     m->name = name;
     m->depth = 0;
     m->owner = 0;
+    m->skipLock = skipLock;
     
     /* Initialize mutex attribute object */
     if ((ret = pthread_mutexattr_init(&m->attr)) != 0) return ret;
@@ -143,7 +144,8 @@ int mutexOwnLock(struct mutex *m) {
 /* Wraps a mutex lock operation, tracking lock depth for a wrapper
  * mutex structure */
 int wrapperMutexLock(struct wrapperMutex *wm) {
-    assert(wm->lock);
+    if (wm->lock == NULL) return 0;
+    if (wm->lock->skipLock != NULL && wm->lock->skipLock()) return 0;
     int ret = mutexLock(wm->lock);
     if (ret == 0)
         wm->depth++;
@@ -152,7 +154,8 @@ int wrapperMutexLock(struct wrapperMutex *wm) {
 
 /* Attempts to lock a mutex, wrapped for tracking lock depth */
 int wrapperMutexTryLock(struct wrapperMutex *wm) {
-    assert(wm->lock);
+    if (wm->lock == NULL) return 0;
+    if (wm->lock->skipLock != NULL && wm->lock->skipLock()) return 0;
     int ret = mutexTryLock(wm->lock);
     if (ret == 0)
         wm->depth++;
@@ -166,6 +169,7 @@ int wrapperMutexUnlock(struct wrapperMutex *wm) {
     int ret = 0;
     if (wm->lock == NULL || wm->depth == 0)
         return ret;
+    if (wm->lock->skipLock != NULL && wm->lock->skipLock()) return ret;
     ret = mutexUnlock(wm->lock);
     if (ret == 0)
         wm->depth--;
@@ -174,6 +178,7 @@ int wrapperMutexUnlock(struct wrapperMutex *wm) {
 
 /* Determines if the current thread owns the lock of a wrapper mutex */
 int wrapperMutexOwnLock(struct wrapperMutex *wm) {
-    assert(wm->lock);
+    if (wm->lock == NULL) return 1;
+    if (wm->lock->skipLock != NULL && wm->lock->skipLock()) return 1;
     return mutexOwnLock(wm->lock);
 }

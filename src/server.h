@@ -1836,7 +1836,7 @@ void parsedRelease(void *ptr);
 /* networking.c -- Networking and Client related operations */
 client *createClient(connection *conn, int iel);
 void closeTimedoutClients(void);
-int freeClient(client *c);
+void freeClient(client *c);
 void freeClientAsync(client *c);
 void resetClient(client *c);
 void freeClientOriginalArgv(client *c);
@@ -2444,7 +2444,6 @@ int migrateGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResul
 int georadiusGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
 int xreadGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
 int memoryGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
-int lcsGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
 
 /* Cluster */
 void clusterInit(void);
@@ -2744,7 +2743,7 @@ void xdelCommand(client *c);
 void xtrimCommand(client *c);
 void lolwutCommand(client *c);
 void aclCommand(client *c);
-void stralgoCommand(client *c);
+void lcsCommand(client *c);
 void resetCommand(client *c);
 void failoverCommand(client *c);
 
@@ -2803,5 +2802,6 @@ int tlsConfigure(redisTLSContextConfig *ctx_config);
 int iAmMaster(void);
 void aeClosePipes(aeEventLoop *eventLoop);
 int threadOwnLock();
+int skipLock();
 
 #endif

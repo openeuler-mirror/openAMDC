@@ -1,7 +1,7 @@
 What is openAMDC?
 -----------------
 
-openAMDC is an open source, high-performance, in-memory, key-value database which forks from Redis. It is compatible with all the commands, protocol and data structures that were originally available in Redis, making it feasible to utilize openAMDC as a direct substitute for Redis. The architecture of openAMDC is as follows:
+openAMDC is an open source, high-performance, in-memory, key-value database. It is compatible with all the commands, protocol and data structures that were originally available in Redis, making it feasible to utilize openAMDC as a direct substitute for Redis. The architecture of openAMDC is as follows:
 
 <br/>
 <div align="center">
@@ -199,7 +199,7 @@ You can use openamdc-cli to play with openAMDC. Start a openamdc-server instance
 then in another terminal try the following:
 
     % cd src
-    % ./oepnamdc-cli
+    % ./openamdc-cli
     openamdc> ping
     PONG
     openamdc> set foo bar
@@ -238,15 +238,15 @@ to run openAMDC properly as a background daemon that will start again on
 system reboots.
 
 You'll be able to stop and start openAMDC using the script named
-`/etc/init.d/openamdc_<portnumber>`, for instance `/etc/init.d/oepnamdc_6379`.
+`/etc/init.d/openamdc_<portnumber>`, for instance `/etc/init.d/openamdc_6379`.
 
 Code contributions
 ------------------
 
 Note: Contribute code to the openAMDC project by sending a pull request via
-Gitee, you agree to release your code under the terms of the BSD license
+Gitee, you agree to release your code under the terms of the MulanPSLv2 license
 that you can find in the COPYING file included in the openAMDC source
-distribution. You will include BSD license in the COPYING file within each
+distribution. You will include MulanPSLv2 license in the COPYING file within each
 source file that you contribute.
 
 1. If it is a major feature or a semantical change, create an [issue](.github/ISSUE_TEMPLATE/feature_request.md)
