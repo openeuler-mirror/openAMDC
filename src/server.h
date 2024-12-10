@@ -1647,6 +1647,37 @@ struct redisServer {
                                 * failover then any replica can be used. */
     int target_replica_port; /* Failover target port */
     int failover_state; /* Failover state */
+
+    /* Swap data */
+    int swap_enabled; /* Is swap enabled? */
+    struct swapState *swap; /* State of the swap */
+    int rocksdb_max_background_jobs; /* Set the maximum number of concurrent background operations such as compaction and mergin */
+    int rocksdb_max_background_compactions; /* The maximum number of concurrent compaction jobs in the background */
+    int rocksdb_max_background_flushes; /* The maximum number of concurrent flush operations that RocksDB can execute in the background. */
+    int rocksdb_max_subcompactions; /* The maximum number of subcompactions that can be run in parallel for a single compaction operation */
+    int rocksdb_max_open_files; /* The maximum number of open files that RocksDB can use. */
+    int rocksdb_enable_pipelined_write; /* Enable pipelined write operation to improve write throughput. */
+    int rocksdb_WAL_ttl_seconds; /* The time (in seconds) to retain the WAL (Write-Ahead Log) before it can be discarded. */
+    int rocksdb_WAL_size_limit_MB; /* The maximum size limit (in megabytes) of the Write-Ahead Log (WAL) in RocksDB. */
+    unsigned long long rocksdb_max_total_wal_size; /* The maximum total size limit of all Write-Ahead Logs (WALs) in RocksDB. */
+    int rocksdb_compression; /* The compression algorithm used for data storage to reduce disk space usage. */
+    int rocksdb_level0_slowdown_writes_trigger; /* The condition to slow down writes when the number of L0 files reaches a certain threshold. */
+    int rocksdb_disable_auto_compactions; /* Whether to disable automatic Compactions. */
+    int rocksdb_enable_blob_files; /* Enable or disable the use of blob files for storing large values separately. */
+    int rocksdb_enable_blob_garbage_collection; /* Enable or disable blob garbage collection in RocksDB. */
+    unsigned long long rocksdb_min_blob_size; /* The minimum size of a blob in RocksDB. */
+    unsigned long long rocksdb_blob_file_size; /* The size limit of a blob file in RocksDB. */
+    int rocksdb_blob_garbage_collection_age_cutoff_percentage; /* The percentage threshold for blob garbage collection age cutoff in RocksDB. */
+    int rocksdb_blob_garbage_collection_force_threshold_percentage; /* The percentage threshold that forces RocksDB blob garbage collection. */
+    int rocksdb_max_write_buffer_number; /* The percentage threshold that forces blob garbage collection when exceeded. */
+    unsigned long long rocksdb_target_file_size_base; /* The base size for target file size in RocksDB, which affects the size of files to be compacted. */
+    unsigned long long rocksdb_write_buffer_size; /* The size of the buffer used for writing data before flushing to disk in RocksDB. */
+    unsigned long long rocksdb_max_bytes_for_level_base; /* The maximum number of bytes for a single level in RocksDB (except the last level). */
+    int rocksdb_max_bytes_for_level_multiplier; /* The multiplier used to calculate the maximum bytes for each level in RocksDB. */
+    int rocksdb_compaction_dynamic_level_bytes; /* This parameter controls the dynamic bytes limit for each compaction level in RocksDB. */
+    int rocksdb_block_size; /* The size of a RocksDB block which affects data storage and retrieval efficiency. */
+    int rocksdb_cache_index_and_filter_blocks; /* Whether to cache index and filter blocks in RocksDB cache. */
+    unsigned long long rocksdb_block_cache_size; /* The size of RocksDB block cache which stores frequently accessed data blocks to improve read performance. */
 };
 
 #define MAX_KEYS_BUFFER 256
