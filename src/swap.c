@@ -122,3 +122,94 @@ void rocksClose(void) {
     rocksdb_readoptions_destroy(rocks->ropts);
     rocksdb_close(rocks->db);
 }
+
+adaptiveLRU *adaptiveLRUCreate(void) {
+    struct adaptiveLRU *al;
+
+    if ((al = zmalloc(sizeof(*al))) == NULL)
+        return NULL;
+    al->warm_aligned_list = listCreate();
+    al->warm_unaligned_list = listCreate();
+    al->hot_aligned_list = listCreate();
+    al->hot_unaligned_list = listCreate();
+    return al;
+}
+
+void adaptiveLRURelease(adaptiveLRU *al) {
+    listRelease(al->warm_aligned_list);
+    listRelease(al->warm_unaligned_list);
+    listRelease(al->hot_aligned_list);
+    listRelease(al->hot_unaligned_list);
+    zfree(al);
+}
+
+listNode *adaptiveLRUAdd(adaptiveLRU *al, void *val, int to) {
+    list *targetList = NULL;
+
+    switch (to) {
+        case AL_WARM_ALIGNED_LIST: targetList = al->warm_aligned_list; break;
+        case AL_WARM_UNALIGNED_LIST: targetList = al->warm_unaligned_list; break;
+        case AL_HOT_ALIGNED_LIST: targetList = al->hot_aligned_list; break;
+        case AL_HOT_UNALIGNED_LIST: targetList = al->hot_unaligned_list; break;
+        default: serverPanic("Invalid adaptiveLRU type");
+    }
+
+    if (listAddNodeHead(targetList, val) == NULL)
+        return NULL;
+    else
+        return listFirst(targetList);
+}
+
+listNode *moveNode(adaptiveLRU *al, listNode *node, int *from, int to) {
+    void *val = node->value;
+    adaptiveLRUDel(al, node, *from);
+
+    *from = to;
+    listNode *newNode = adaptiveLRUAdd(al, val, to);
+    if (!newNode) {
+        serverPanic("Failed to add node to list");
+    }
+    return newNode;
+}
+
+listNode *adaptiveLRUConvert(adaptiveLRU *al, listNode *node, int *from, int rw) {
+    if (rw == AL_READ) {
+        switch (*from) {
+            case AL_WARM_ALIGNED_LIST:
+                return moveNode(al, node, from, AL_HOT_ALIGNED_LIST);
+            case AL_HOT_ALIGNED_LIST:
+                return moveNode(al, node, from, AL_HOT_ALIGNED_LIST);
+            case AL_WARM_UNALIGNED_LIST:
+                return moveNode(al, node, from, AL_HOT_UNALIGNED_LIST);
+            case AL_HOT_UNALIGNED_LIST:
+                return moveNode(al, node, from, AL_HOT_UNALIGNED_LIST);
+            default:
+                serverPanic("Invalid from value");
+        }
+    } else if (rw == AL_WRITE) {
+        switch (*from) {
+            case AL_WARM_ALIGNED_LIST:
+                return moveNode(al, node, from, AL_HOT_UNALIGNED_LIST);
+            case AL_HOT_ALIGNED_LIST:
+                return moveNode(al, node, from, AL_HOT_UNALIGNED_LIST);
+            case AL_WARM_UNALIGNED_LIST:
+                return moveNode(al, node, from, AL_HOT_UNALIGNED_LIST);
+            case AL_HOT_UNALIGNED_LIST:
+                return moveNode(al, node, from, AL_HOT_UNALIGNED_LIST);
+            default:
+                serverPanic("Invalid from value");
+        }
+    } else {
+        serverPanic("Invalid rw value");
+    }
+}
+
+void adaptiveLRUDel(adaptiveLRU *al, listNode *node, int from) {
+    switch(from) {
+        case AL_WARM_ALIGNED_LIST: listDelNode(al->warm_aligned_list, node); break;
+        case AL_WARM_UNALIGNED_LIST: listDelNode(al->warm_unaligned_list, node); break;
+        case AL_HOT_ALIGNED_LIST: listDelNode(al->hot_aligned_list, node); break;
+        case AL_HOT_UNALIGNED_LIST: listDelNode(al->hot_unaligned_list, node); break;
+        default: serverPanic("Invalid adaptiveLRU type");
+    }
+}

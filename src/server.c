@@ -13,6 +13,7 @@
 #include "server.h"
 #include "monotonic.h"
 #include "cluster.h"
+#include "swap.h"
 #include "slowlog.h"
 #include "bio.h"
 #include "latency.h"
@@ -6411,7 +6412,8 @@ struct redisTest {
     {"crc64", crc64Test},
     {"zmalloc", zmalloc_test},
     {"sds", sdsTest},
-    {"dict", dictTest}
+    {"dict", dictTest},
+    {"cuckoofilter", cuckooFilterTest}
 };
 redisTestProc *getTestProcByName(const char *name) {
     int numtests = sizeof(redisTests)/sizeof(struct redisTest);
@@ -6494,6 +6496,10 @@ int main(int argc, char **argv) {
     uint8_t hashseed[16];
     getRandomBytes(hashseed,sizeof(hashseed));
     dictSetHashFunctionSeed(hashseed);
+    if (server.swap_enabled) {
+        getRandomBytes(hashseed,sizeof(hashseed));
+        cuckooFilterSetHashFunctionSeed(hashseed);
+    }
     server.sentinel_mode = checkForSentinelMode(argc,argv);
     initServerConfig();
     ACLInit(); /* The ACL subsystem must be initialized ASAP because the
