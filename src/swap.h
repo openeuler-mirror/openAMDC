@@ -15,6 +15,7 @@
 
 #include <rocksdb/c.h>
 #include "adlist.h"
+#include "cuckoo_filter.h"
 
 typedef struct rocks {
   rocksdb_t *db;
@@ -60,6 +61,7 @@ typedef struct persistent {
 struct swapState {
     rocks *rocks; /* RocksDB data */
     adaptiveLRU *al;
+    cuckooFilter *cf;
     uint64_t swap_data_version;
 };
 
