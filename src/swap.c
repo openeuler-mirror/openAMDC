@@ -21,12 +21,14 @@
 
 #define ROCKSDB_DIR "rocksdb.data"
 
+/* Initializes the RocksDB database. */
 int rocksInit(void) {
     server.swap->rocks = zmalloc(sizeof(struct rocks));
     server.swap->rocks->snapshot = NULL;
     return rocksOpen(server.swap->rocks);
 }
 
+/* Opens or creates the RocksDB database. */
 int rocksOpen(struct rocks *rocks) {
     char *errs = NULL;
     char **cf_names = zmalloc(sizeof(char *) * server.dbnum);
@@ -37,11 +39,13 @@ int rocksOpen(struct rocks *rocks) {
     rocksdb_options_set_create_missing_column_families(rocks->db_opts, 1);
     rocksdb_options_optimize_for_point_lookup(rocks->db_opts, 1);
 
+    /* Set compaction options. */
     rocksdb_options_set_min_write_buffer_number_to_merge(rocks->db_opts, 2);
     rocksdb_options_set_level0_file_num_compaction_trigger(rocks->db_opts, 2);
     rocksdb_options_set_max_bytes_for_level_base(rocks->db_opts, 256 * MB);
     rocksdb_options_compaction_readahead_size(rocks->db_opts, 2 * 1024 * 1024);
 
+    /* Set log and manifest file size options. */
     rocksdb_options_set_max_background_jobs(rocks->db_opts, server.rocksdb_max_background_jobs);
     rocksdb_options_set_max_background_compactions(rocks->db_opts, server.rocksdb_max_background_compactions);
     rocksdb_options_set_max_background_flushes(rocks->db_opts, server.rocksdb_max_background_flushes);
@@ -49,19 +53,23 @@ int rocksOpen(struct rocks *rocks) {
     rocksdb_options_set_max_open_files(rocks->db_opts, server.rocksdb_max_open_files);
     rocksdb_options_set_enable_pipelined_write(rocks->db_opts, server.rocksdb_enable_pipelined_write);
 
+    /* Set log and manifest file size options. */
     rocksdb_options_set_max_manifest_file_size(rocks->db_opts, 64 * MB);
     rocksdb_options_set_max_log_file_size(rocks->db_opts, 256 * MB);
     rocksdb_options_set_keep_log_file_num(rocks->db_opts, 12);
-
+    
+    /* Set read options. */
     rocks->ropts = rocksdb_readoptions_create();
     rocksdb_readoptions_set_verify_checksums(rocks->ropts, 0);
     rocksdb_readoptions_set_fill_cache(rocks->ropts, 1);
-
+    
+    /* Set write options. */
     rocks->wopts = rocksdb_writeoptions_create();
     rocksdb_options_set_WAL_ttl_seconds(rocks->db_opts, server.rocksdb_WAL_ttl_seconds);
     rocksdb_options_set_WAL_size_limit_MB(rocks->db_opts, server.rocksdb_WAL_size_limit_MB);
     rocksdb_options_set_max_total_wal_size(rocks->db_opts, server.rocksdb_max_total_wal_size);
-
+    
+    /* Configure each database's column families. */
     for (int i = 0; i < server.dbnum; i++) {
         cf_names[i] = i == 0 ? sdsnew("default") : sdscatfmt(sdsempty(), "db%d", i);
         cf_opts[i] = rocksdb_options_create_copy(rocks->db_opts);
@@ -91,6 +99,7 @@ int rocksOpen(struct rocks *rocks) {
         rocksdb_block_based_options_destroy(block_opts);
     }
     
+    /* Open the database. */
     rocks->db = rocksdb_open_column_families(rocks->db_opts, ROCKSDB_DIR, server.dbnum, (const char *const *)cf_names,
                                              (const rocksdb_options_t *const *)cf_opts, rocks->cf_handles, &errs);
     if (errs != NULL) {
@@ -98,7 +107,8 @@ int rocksOpen(struct rocks *rocks) {
         zlibc_free(errs);
         return C_ERR;
     }
-
+    
+    /* Clean up resources. */
     for (int i = 0; i < server.dbnum; i++) {
         sdsfree(cf_names[i]);
         rocksdb_options_destroy(cf_opts[i]);
@@ -109,6 +119,7 @@ int rocksOpen(struct rocks *rocks) {
     return C_OK;
 }
 
+/* Closes the RocksDB database. */
 void rocksClose(void) {
     struct rocks *rocks = server.swap->rocks;
     rocksdb_cancel_all_background_work(rocks->db, 1);
@@ -123,6 +134,7 @@ void rocksClose(void) {
     rocksdb_close(rocks->db);
 }
 
+/* Creates an adaptive LRU cache. */
 adaptiveLRU *adaptiveLRUCreate(void) {
     struct adaptiveLRU *al;
 
@@ -135,6 +147,7 @@ adaptiveLRU *adaptiveLRUCreate(void) {
     return al;
 }
 
+/* Releases the adaptive LRU cache. */
 void adaptiveLRURelease(adaptiveLRU *al) {
     listRelease(al->warm_aligned_list);
     listRelease(al->warm_unaligned_list);
@@ -143,6 +156,7 @@ void adaptiveLRURelease(adaptiveLRU *al) {
     zfree(al);
 }
 
+/* Adds a node to the adaptive LRU cache. */
 listNode *adaptiveLRUAdd(adaptiveLRU *al, void *val, int to) {
     list *targetList = NULL;
 
@@ -160,6 +174,7 @@ listNode *adaptiveLRUAdd(adaptiveLRU *al, void *val, int to) {
         return listFirst(targetList);
 }
 
+/* Moves a node between lists in the adaptive LRU cache. */
 listNode *moveNode(adaptiveLRU *al, listNode *node, int *from, int to) {
     void *val = node->value;
     adaptiveLRUDel(al, node, *from);
@@ -172,6 +187,7 @@ listNode *moveNode(adaptiveLRU *al, listNode *node, int *from, int to) {
     return newNode;
 }
 
+/* Converts a node in the adaptive LRU cache based on read/write operations. */
 listNode *adaptiveLRUConvert(adaptiveLRU *al, listNode *node, int *from, int rw) {
     if (rw == AL_READ) {
         switch (*from) {
@@ -204,6 +220,7 @@ listNode *adaptiveLRUConvert(adaptiveLRU *al, listNode *node, int *from, int rw)
     }
 }
 
+/* Deletes a node from the adaptive LRU cache. */
 void adaptiveLRUDel(adaptiveLRU *al, listNode *node, int from) {
     switch(from) {
         case AL_WARM_ALIGNED_LIST: listDelNode(al->warm_aligned_list, node); break;
@@ -211,5 +228,27 @@ void adaptiveLRUDel(adaptiveLRU *al, listNode *node, int from) {
         case AL_HOT_ALIGNED_LIST: listDelNode(al->hot_aligned_list, node); break;
         case AL_HOT_UNALIGNED_LIST: listDelNode(al->hot_unaligned_list, node); break;
         default: serverPanic("Invalid adaptiveLRU type");
+    }
+}
+
+/* Initializes the swap state */
+void swapInit(void) {
+    server.swap = zmalloc(sizeof(*server.swap));    
+    server.swap->al = adaptiveLRUCreate();
+    server.swap->swap_data_version = 0;
+    if (cuckooFilterInit(server.swap->cf, 
+                         server.swap_cuckoofilter_size_for_level /
+                         server.swap_cuckoofilter_bucket_size /
+                         sizeof(CuckooFingerprint),
+                         server.swap_cuckoofilter_bucket_size,
+                         CF_DEFAULT_MAX_ITERATIONS,
+                         CF_DEFAULT_EXPANSION) == -1) {
+        serverLog(LL_WARNING, "Failed to initialize Cuckoo Filter");
+        exit(1);
+    }
+
+    if (rocksInit() == C_ERR) {
+        serverLog(LL_WARNING, "Failed to initialize RocksDB");
+        exit(1);
     }
 }

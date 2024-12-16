@@ -464,7 +464,7 @@ int cuckooFilterTest(int argc, char **argv, int accurate) {
     }
 
     cuckooFilterFree(&ck);
-    // printf("capacity=%ld, fp=%ld, fp_rate=%f%%\n", capacity, false_positive, fp_rate * 100);
+    // printf("capacity=%llu, fp=%ld, fp_rate=%f%%\n", capacity, false_positive, fp_rate * 100);
     return 0;
 }
 

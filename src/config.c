@@ -2798,6 +2798,7 @@ standardConfig configs[] = {
     createIntConfig("hz", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.config_hz, CONFIG_DEFAULT_HZ, INTEGER_CONFIG, NULL, updateHZ),
     createIntConfig("min-replicas-to-write", "min-slaves-to-write", MODIFIABLE_CONFIG, 0, INT_MAX, server.repl_min_slaves_to_write, 0, INTEGER_CONFIG, NULL, updateGoodSlaves),
     createIntConfig("min-replicas-max-lag", "min-slaves-max-lag", MODIFIABLE_CONFIG, 0, INT_MAX, server.repl_min_slaves_max_lag, 10, INTEGER_CONFIG, NULL, updateGoodSlaves),
+    createIntConfig("swap-cuckoofilter-bucket-size", NULL, IMMUTABLE_CONFIG, -1, 64, server.swap_cuckoofilter_bucket_size, 4, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("rocksdb-max-background-jobs", NULL, IMMUTABLE_CONFIG, -1, 64, server.rocksdb_max_background_jobs, 2, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("rocksdb-max-background-compactions", NULL, IMMUTABLE_CONFIG, 1, 64, server.rocksdb_max_background_compactions, 2, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("rocksdb-max-subcompactions", NULL, IMMUTABLE_CONFIG, 1, 64, server.rocksdb_max_subcompactions, 1, INTEGER_CONFIG, NULL, NULL),
@@ -2831,6 +2832,7 @@ standardConfig configs[] = {
 
     /* Unsigned Long Long configs */
     createULongLongConfig("maxmemory", NULL, MODIFIABLE_CONFIG, 0, ULLONG_MAX, server.maxmemory, 0, MEMORY_CONFIG, NULL, updateMaxmemory),
+    createULongLongConfig("swap-cuckoofilter-size-for-level", NULL, IMMUTABLE_CONFIG, 0, ULLONG_MAX, server.swap_cuckoofilter_size_for_level, 64*1024*1024, MEMORY_CONFIG, NULL, NULL),
     createULongLongConfig("rocksdb-max-total-wal-size", NULL, IMMUTABLE_CONFIG, 0, ULLONG_MAX, server.rocksdb_max_total_wal_size, 512*1024*1024, MEMORY_CONFIG, NULL, NULL),
     createULongLongConfig("rocksdb-min-blob-size", NULL, MODIFIABLE_CONFIG, 0, ULLONG_MAX, server.rocksdb_min_blob_size, 4096, MEMORY_CONFIG, NULL, updateRocksdbDataMinBlobSize),
     createULongLongConfig("rocksdb-blob-file-size", NULL, MODIFIABLE_CONFIG, 0, ULLONG_MAX, server.rocksdb_blob_file_size, 256*1024*1024, MEMORY_CONFIG, NULL, updateRocksdbDataBlobFileSize),

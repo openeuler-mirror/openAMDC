@@ -41,7 +41,7 @@ typedef struct cuckooFilterStat {
     double load_factor;
 } cuckooFilterStat;
 
-typedef struct {
+typedef struct cuckooFilterTable {
     uint64_t numBuckets : 56;
     uint64_t bucketSize : 8;
     CuckooFingerprint *data;

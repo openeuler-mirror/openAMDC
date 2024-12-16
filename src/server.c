@@ -3531,6 +3531,7 @@ void initServer(void) {
     }
 
     if (server.cluster_enabled) clusterInit();
+    if (server.swap_enabled) swapInit();
     replicationScriptCacheInit();
     scriptingInit(1);
     slowlogInit();
@@ -4586,6 +4587,17 @@ int prepareForShutdown(int flags) {
                 redisCommunicateSystemd("STATUS=Error trying to save the DB, can't exit.\n");
             return C_ERR;
         }
+    }
+
+    /* Swap the data to RocksDB before exiting. */
+    if (server.swap_enabled) {
+        serverLog(LL_NOTICE,"Swapping the data to RocksDB before exiting.");
+        if (server.supervised_mode == SUPERVISED_SYSTEMD)
+            redisCommunicateSystemd("STATUS=Swapping the data to RocksDB\n");
+        
+        // TODO swap hot data to RocksDB
+
+        rocksClose();
     }
 
     /* Fire the shutdown modules event. */

@@ -1651,6 +1651,8 @@ struct redisServer {
     /* Swap data */
     int swap_enabled; /* Is swap enabled? */
     struct swapState *swap; /* State of the swap */
+    unsigned long long swap_cuckoofilter_size_for_level; /* Size of the cuckoo filter in bytes */
+    int swap_cuckoofilter_bucket_size; /* cuckoo filter bucket size */
     int rocksdb_max_background_jobs; /* Set the maximum number of concurrent background operations such as compaction and mergin */
     int rocksdb_max_background_compactions; /* The maximum number of concurrent compaction jobs in the background */
     int rocksdb_max_background_flushes; /* The maximum number of concurrent flush operations that RocksDB can execute in the background. */

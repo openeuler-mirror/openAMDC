@@ -65,4 +65,6 @@ struct swapState {
     uint64_t swap_data_version;
 };
 
+void swapInit(void);
+
 #endif
