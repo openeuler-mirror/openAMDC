@@ -668,6 +668,7 @@ typedef struct RedisModuleDigest {
 #define OBJ_SHARED_REFCOUNT INT_MAX     /* Global object never destroyed. */
 #define OBJ_STATIC_REFCOUNT (INT_MAX-1) /* Object allocated in the stack. */
 #define OBJ_FIRST_SPECIAL_REFCOUNT OBJ_STATIC_REFCOUNT
+#define OBJ_VERSION_INVALID ((1ULL << 62) - 1) 
 typedef struct redisObject {
     unsigned type:4;
     unsigned encoding:4;
@@ -677,6 +678,12 @@ typedef struct redisObject {
     redisAtomic int refcount;
     void *ptr;
 } robj;
+
+typedef struct redisObjectAugmented {
+    uint64_t loc:2;
+    uint64_t version:62;
+    listNode *node;
+} robjAug;
 
 /* The a string name for an object's type as listed above
  * Native types are checked against the OBJ_STRING, OBJ_LIST, OBJ_* defines,
@@ -1320,6 +1327,10 @@ struct redisServer {
     long long stat_dump_payload_sanitizations; /* Number deep dump payloads integrity validations. */
     redisAtomic long long stat_total_reads_processed; /* Total number of read events processed */
     redisAtomic long long stat_total_writes_processed; /* Total number of write events processed */
+    long long stat_swap_in_keys_total; /* Total number of keys swapped in */
+    long long stat_swap_in_empty_keys_skipped; /* Number of swap keys skipped due to being empty */
+    long long stat_swap_in_expired_keys_skipped; /* Number of swap keys skipped due to being expired */
+    long long stat_swap_out_keys_total; /* Total number of keys swapped out */
     /* The following two are used to track instantaneous metrics, like
      * number of operations per second, network traffic. */
     struct {
@@ -2038,6 +2049,12 @@ void afterPropagateExec();
 void decrRefCount(robj *o);
 void decrRefCountVoid(void *o);
 void incrRefCount(robj *o);
+uint64_t getVersion(robj* o);
+void setVersion(robj *o, uint64_t version);
+uint16_t getLoc(robj* o);
+void setLoc(robj *o, uint16_t loc);
+listNode *getNode(robj* o);
+void setNode(robj *o, listNode *node);
 robj *makeObjectShared(robj *o);
 robj *resetRefCount(robj *obj);
 void freeStringObject(robj *o);

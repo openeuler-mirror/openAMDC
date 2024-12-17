@@ -11,6 +11,7 @@
  */
 
 #include "server.h"
+#include "swap.h"
 #include <math.h>
 #include <ctype.h>
 
@@ -21,7 +22,9 @@
 /* ===================== Creation and parsing of objects ==================== */
 
 robj *createObject(int type, void *ptr) {
-    robj *o = zmalloc(sizeof(*o));
+    size_t extraSize = server.swap_enabled ? sizeof(robjAug) : 0;
+    char *bytes = zmalloc(sizeof(robj)+extraSize);
+    robj *o = (robj*)(bytes+extraSize);
     o->type = type;
     o->encoding = OBJ_ENCODING_RAW;
     o->ptr = ptr;
@@ -64,7 +67,9 @@ robj *createRawStringObject(const char *ptr, size_t len) {
  * an object where the sds string is actually an unmodifiable string
  * allocated in the same chunk as the object itself. */
 robj *createEmbeddedStringObject(const char *ptr, size_t len) {
-    robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr8)+len+1);
+    size_t extraSize = server.swap_enabled ? sizeof(robjAug) : 0;
+    char *bytes = zmalloc(sizeof(robj)+extraSize+sizeof(struct sdshdr8)+len+1);
+    robj *o = (robj*)(bytes+extraSize);
     struct sdshdr8 *sh = (void*)(o+1);
 
     o->type = OBJ_STRING;
@@ -367,7 +372,10 @@ void decrRefCount(robj *o) {
         case OBJ_STREAM: freeStreamObject(o); break;
         default: serverPanic("Unknown object type"); break;
         }
-        zfree(o);
+        if (server.swap_enabled)
+            zfree((robjAug*)o-1);
+        else
+            zfree(o);
     } else {
         if (o->refcount <= 0) serverPanic("decrRefCount against refcount <= 0");
         if (o->refcount != OBJ_SHARED_REFCOUNT) o->refcount--;
@@ -379,6 +387,51 @@ void decrRefCount(robj *o) {
  * prototype for the free method. */
 void decrRefCountVoid(void *o) {
     decrRefCount(o);
+}
+
+uint64_t getVersion(robj* o) {
+    if (server.swap_enabled) {
+        robjAug *aug = (robjAug*)o - 1;
+        return aug->version;
+    }
+    return OBJ_VERSION_INVALID;
+}
+
+void setVersion(robj *o, uint64_t version) {
+    if (!server.swap_enabled)
+        return;
+    robjAug *aug = (robjAug*)o - 1;
+    aug->version = version;
+}
+
+uint16_t getLoc(robj* o) {
+    if (server.swap_enabled) {
+        robjAug *aug = (robjAug*)o - 1;
+        return aug->loc;
+    }
+    return AL_LOC_INVALID;
+}
+
+void setLoc(robj *o, uint16_t loc) {
+    if (!server.swap_enabled)
+        return;
+    robjAug *aug = (robjAug*)o - 1;
+    aug->loc = loc;
+}
+
+listNode *getNode(robj* o) {
+    if (server.swap_enabled) {
+        robjAug *aug = (robjAug*)o - 1;
+        return aug->node;
+    }
+    return NULL;
+}
+
+void setNode(robj *o, listNode *node) {
+    if (!server.swap_enabled)
+        return;
+    robjAug *aug = (robjAug*)o - 1;
+    aug->node = node;
 }
 
 int checkType(client *c, robj *o, int type) {

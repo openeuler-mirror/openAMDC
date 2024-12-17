@@ -30,10 +30,11 @@ int rocksInit(void);
 int rocksOpen(struct rocks *rocks);
 void rocksClose(void);
 
-#define AL_WARM_ALIGNED_LIST 0
-#define AL_WARM_UNALIGNED_LIST 1
-#define AL_HOT_ALIGNED_LIST 2
-#define AL_HOT_UNALIGNED_LIST 3
+#define AL_LOC_INVALID 0
+#define AL_WARM_ALIGNED_LOC 1
+#define AL_WARM_UNALIGNED_LOC 2
+#define AL_HOT_ALIGNED_LOC 3
+#define AL_HOT_UNALIGNED_LOC 4
 
 #define AL_READ 0
 #define AL_WRITE 1
@@ -51,20 +52,37 @@ listNode *adaptiveLRUAdd(adaptiveLRU *al, void *val, int to);
 listNode *adaptiveLRUConvert(adaptiveLRU *al, listNode *node, int *from, int rw);
 void adaptiveLRUDel(adaptiveLRU *al, listNode *node, int from);
 
-typedef struct persistent {
-    unsigned where:2;
-    unsigned unused:6;
-    unsigned lfu:LRU_BITS;
-    listNode *node;
-} persistent;
+typedef struct swapDataRetrieval {
+    int dbid;
+    robj *val;
+    long long expiretime;
+    long long lfu_freq;
+} swapDataRetrieval;
+
+swapDataRetrieval *swapDataRetrievalCreate(int dbid, robj *val, long long expiretime, long long lfu_freq);
+void swapDataRetrievalRelease(swapDataRetrieval *r);
+
+typedef struct swapDataEntry {
+    int intention;
+    int dbid;
+    robj *key;
+    robj *val;
+    long long expiretime;
+} swapDataEntry;
+
+swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, long long expiretime);
+void swapDataEntryRelease(swapDataEntry *e);
 
 struct swapState {
     rocks *rocks; /* RocksDB data */
     adaptiveLRU *al;
     cuckooFilter *cf;
+    list *pending_reqs[MAX_THREAD_VAR];
     uint64_t swap_data_version;
 };
 
 void swapInit(void);
+void swapRelease(void);
+robj* swapIn(int dbid, robj *key);
 
 #endif

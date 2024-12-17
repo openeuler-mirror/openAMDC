@@ -161,10 +161,10 @@ listNode *adaptiveLRUAdd(adaptiveLRU *al, void *val, int to) {
     list *targetList = NULL;
 
     switch (to) {
-        case AL_WARM_ALIGNED_LIST: targetList = al->warm_aligned_list; break;
-        case AL_WARM_UNALIGNED_LIST: targetList = al->warm_unaligned_list; break;
-        case AL_HOT_ALIGNED_LIST: targetList = al->hot_aligned_list; break;
-        case AL_HOT_UNALIGNED_LIST: targetList = al->hot_unaligned_list; break;
+        case AL_WARM_ALIGNED_LOC: targetList = al->warm_aligned_list; break;
+        case AL_WARM_UNALIGNED_LOC: targetList = al->warm_unaligned_list; break;
+        case AL_HOT_ALIGNED_LOC: targetList = al->hot_aligned_list; break;
+        case AL_HOT_UNALIGNED_LOC: targetList = al->hot_unaligned_list; break;
         default: serverPanic("Invalid adaptiveLRU type");
     }
 
@@ -191,27 +191,27 @@ listNode *moveNode(adaptiveLRU *al, listNode *node, int *from, int to) {
 listNode *adaptiveLRUConvert(adaptiveLRU *al, listNode *node, int *from, int rw) {
     if (rw == AL_READ) {
         switch (*from) {
-            case AL_WARM_ALIGNED_LIST:
-                return moveNode(al, node, from, AL_HOT_ALIGNED_LIST);
-            case AL_HOT_ALIGNED_LIST:
-                return moveNode(al, node, from, AL_HOT_ALIGNED_LIST);
-            case AL_WARM_UNALIGNED_LIST:
-                return moveNode(al, node, from, AL_HOT_UNALIGNED_LIST);
-            case AL_HOT_UNALIGNED_LIST:
-                return moveNode(al, node, from, AL_HOT_UNALIGNED_LIST);
+            case AL_WARM_ALIGNED_LOC:
+                return moveNode(al, node, from, AL_HOT_ALIGNED_LOC);
+            case AL_HOT_ALIGNED_LOC:
+                return moveNode(al, node, from, AL_HOT_ALIGNED_LOC);
+            case AL_WARM_UNALIGNED_LOC:
+                return moveNode(al, node, from, AL_HOT_UNALIGNED_LOC);
+            case AL_HOT_UNALIGNED_LOC:
+                return moveNode(al, node, from, AL_HOT_UNALIGNED_LOC);
             default:
                 serverPanic("Invalid from value");
         }
     } else if (rw == AL_WRITE) {
         switch (*from) {
-            case AL_WARM_ALIGNED_LIST:
-                return moveNode(al, node, from, AL_HOT_UNALIGNED_LIST);
-            case AL_HOT_ALIGNED_LIST:
-                return moveNode(al, node, from, AL_HOT_UNALIGNED_LIST);
-            case AL_WARM_UNALIGNED_LIST:
-                return moveNode(al, node, from, AL_HOT_UNALIGNED_LIST);
-            case AL_HOT_UNALIGNED_LIST:
-                return moveNode(al, node, from, AL_HOT_UNALIGNED_LIST);
+            case AL_WARM_ALIGNED_LOC:
+                return moveNode(al, node, from, AL_HOT_UNALIGNED_LOC);
+            case AL_HOT_ALIGNED_LOC:
+                return moveNode(al, node, from, AL_HOT_UNALIGNED_LOC);
+            case AL_WARM_UNALIGNED_LOC:
+                return moveNode(al, node, from, AL_HOT_UNALIGNED_LOC);
+            case AL_HOT_UNALIGNED_LOC:
+                return moveNode(al, node, from, AL_HOT_UNALIGNED_LOC);
             default:
                 serverPanic("Invalid from value");
         }
@@ -223,12 +223,145 @@ listNode *adaptiveLRUConvert(adaptiveLRU *al, listNode *node, int *from, int rw)
 /* Deletes a node from the adaptive LRU cache. */
 void adaptiveLRUDel(adaptiveLRU *al, listNode *node, int from) {
     switch(from) {
-        case AL_WARM_ALIGNED_LIST: listDelNode(al->warm_aligned_list, node); break;
-        case AL_WARM_UNALIGNED_LIST: listDelNode(al->warm_unaligned_list, node); break;
-        case AL_HOT_ALIGNED_LIST: listDelNode(al->hot_aligned_list, node); break;
-        case AL_HOT_UNALIGNED_LIST: listDelNode(al->hot_unaligned_list, node); break;
+        case AL_WARM_ALIGNED_LOC: listDelNode(al->warm_aligned_list, node); break;
+        case AL_WARM_UNALIGNED_LOC: listDelNode(al->warm_unaligned_list, node); break;
+        case AL_HOT_ALIGNED_LOC: listDelNode(al->hot_aligned_list, node); break;
+        case AL_HOT_UNALIGNED_LOC: listDelNode(al->hot_unaligned_list, node); break;
         default: serverPanic("Invalid adaptiveLRU type");
     }
+}
+
+/* Creates and sets up the necessary resources for data retrieval in the swap process */
+swapDataRetrieval *swapDataRetrievalCreate(int dbid, robj *val, long long expiretime, long long lfu_freq) {
+    swapDataRetrieval *r = zmalloc(sizeof(swapDataRetrieval));
+    r->dbid = dbid;
+    r->val = val;
+    r->expiretime = expiretime;
+    r->lfu_freq = lfu_freq;
+    return r;
+}
+
+/* Releases the swapDataRetrieval. */
+void swapDataRetrievalRelease(swapDataRetrieval *r) {
+    if (r == NULL) return;
+    zfree(r);
+}
+
+/* Creates a new data entry for the swap process. */
+swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, long long expiretime) {
+    swapDataEntry *req = zmalloc(sizeof(swapDataEntry));
+    req->intention = intention;
+    req->dbid = dbid;
+    req->key = key;
+    req->val = NULL;
+    req->expiretime = expiretime;
+    incrRefCount(key);
+    return req;
+}
+
+/* Releases the swapDataEntry. */
+void swapDataEntryRelease(swapDataEntry *e) {
+    if (e == NULL) return;
+    decrRefCount(e->key);
+    if (e->val)
+        decrRefCount(e->val);
+    zfree(e);
+}
+
+/* Encodes an object into a buffer for storage. */
+static sds swapDataEncodeObject(swapDataEntry *req) {
+    uint8_t b[1];
+    rio payload;
+    int rdb_compression = server.rdb_compression;
+    server.rdb_compression = 0;
+
+    serverAssert(server.maxmemory_policy & MAXMEMORY_FLAG_LFU);
+
+    /* Init RIO */
+    rioInitWithBuffer(&payload, sdsempty());
+
+    /* Save the DB number */
+    if (rdbSaveType(&payload, RDB_OPCODE_SELECTDB) == -1) goto werr;
+    if (rdbSaveLen(&payload, req->dbid) == -1) goto werr;
+
+    /* Save the expire time */
+    if (req->expiretime != -1) {
+        if (rdbSaveType(&payload,RDB_OPCODE_EXPIRETIME_MS) == -1) goto werr;
+        if (rdbSaveMillisecondTime(&payload,req->expiretime) == -1) goto werr;
+    }
+
+    /* Save the LFU info. */
+    b[0] = LFUDecrAndReturn(req->val);
+    if (rdbSaveType(&payload, RDB_OPCODE_FREQ) == -1) goto werr;
+    if (rioWrite(&payload, b,1) == 0) goto werr;
+
+    /* Save type, value */
+    if (rdbSaveObjectType(&payload, req->val) == -1) goto werr;
+    if (rdbSaveObject(&payload, req->val, req->key) == -1) goto werr;
+
+    /* Save EOF */
+    if (rdbSaveType(&payload, RDB_OPCODE_EOF) == -1) goto werr;
+
+    server.rdb_compression = rdb_compression;
+    return payload.io.buffer.ptr;
+
+werr:
+    server.rdb_compression = rdb_compression;
+    serverLog(LL_WARNING, "Failed to encode object");
+    return NULL;
+}
+
+/* Decodes a serialized object from a buffer and adds it to the dict. */
+static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len) {
+    rio payload;
+    robj *val = NULL;
+    swapDataRetrieval *r = NULL;
+    int type, error, dbid = 0;
+    long long lfu_freq = -1, expiretime = -1;
+    rioInitWithCBuffer(&payload, buf, len);
+    while (1) {
+        /* Read type. */
+        if ((type = rdbLoadType(&payload)) == -1)
+            goto rerr;
+
+        /* Handle special types. */
+        if (type == RDB_OPCODE_SELECTDB) {
+            if ((dbid = rdbLoadLen(&payload, NULL)) == -1) goto rerr;
+            continue;
+        } else if (type == RDB_OPCODE_EXPIRETIME_MS) {
+            if ((expiretime = rdbLoadMillisecondTime(&payload, RDB_VERSION)) == -1)
+                goto rerr;
+            continue;
+        } else if (type == RDB_OPCODE_FREQ) {
+            uint8_t byte;
+            if (rioRead(&payload, &byte,1) == 0)
+                goto rerr;
+            lfu_freq = byte;
+            continue;
+        } else if (type == RDB_OPCODE_EOF) {
+            break;
+        }
+
+        /* Read value */
+        val = rdbLoadObject(type, &payload, key->ptr, &error);
+    
+        /* Check if the key already expired. */
+        if (val == NULL) {
+            if (error == RDB_LOAD_ERR_EMPTY_KEY) {
+                server.stat_swap_in_empty_keys_skipped++;
+                serverLog(LL_WARNING, "Decode object skipping empty key: %s", (sds)key->ptr);
+            } else {
+                goto rerr;
+            }
+        } else {
+            r = swapDataRetrievalCreate(dbid, val, expiretime, lfu_freq);
+        }
+    }
+    return r;
+
+rerr:
+    serverLog(LL_WARNING, "Failed to decode object");
+    return NULL;
 }
 
 /* Initializes the swap state */
@@ -236,6 +369,12 @@ void swapInit(void) {
     server.swap = zmalloc(sizeof(*server.swap));    
     server.swap->al = adaptiveLRUCreate();
     server.swap->swap_data_version = 0;
+
+    if (rocksInit() == C_ERR) {
+        serverLog(LL_WARNING, "Failed to initialize RocksDB");
+        exit(1);
+    }
+
     if (cuckooFilterInit(server.swap->cf, 
                          server.swap_cuckoofilter_size_for_level /
                          server.swap_cuckoofilter_bucket_size /
@@ -247,8 +386,21 @@ void swapInit(void) {
         exit(1);
     }
 
-    if (rocksInit() == C_ERR) {
-        serverLog(LL_WARNING, "Failed to initialize RocksDB");
-        exit(1);
+    for (int iel = 0; iel < MAX_THREAD_VAR; ++iel) {
+        if (iel < server.worker_threads_num || 
+            (iel == MODULE_THREAD_ID && server.worker_threads_num > 1)) {
+            server.swap->pending_reqs[iel] = listCreate();
+        }
     }
+}
+
+/* Releases resources and performs cleanup operations related to the swap process. */
+void swapRelease(void) {
+    for (int iel = 0; iel < MAX_THREAD_VAR; ++iel) {
+        if (iel < server.worker_threads_num || 
+            (iel == MODULE_THREAD_ID && server.worker_threads_num > 1)) {
+            listRelease(server.swap->pending_reqs[iel]);
+        }
+    }
+    rocksClose();
 }

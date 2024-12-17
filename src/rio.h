@@ -52,6 +52,12 @@ struct _rio {
             sds ptr;
             off_t pos;
         } buffer;
+        /* In-memory cbuffer target. */
+        struct {
+            char* ptr;
+            size_t len;
+            off_t pos;
+        } cbuffer;
         /* Stdio file pointer target. */
         struct {
             FILE *fp;
@@ -139,6 +145,7 @@ static inline void rioClearErrors(rio *r) {
 
 void rioInitWithFile(rio *r, FILE *fp);
 void rioInitWithBuffer(rio *r, sds s);
+void rioInitWithCBuffer(rio *r, char *ptr, size_t len);
 void rioInitWithConn(rio *r, connection *conn, size_t read_limit);
 void rioInitWithFd(rio *r, int fd);
 

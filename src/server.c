@@ -3244,6 +3244,10 @@ void resetServerStats(void) {
         server.stat_total_error_replies[iel] = 0;
     server.stat_dump_payload_sanitizations = 0;
     server.aof_delayed_fsync = 0;
+    server.stat_swap_in_empty_keys_skipped = 0;
+    server.stat_swap_in_expired_keys_skipped = 0;
+    server.stat_swap_in_keys_total = 0;
+    server.stat_swap_out_keys_total = 0;
 }
 
 /* Make the thread killable at any time, so that kill threads functions
@@ -4597,7 +4601,7 @@ int prepareForShutdown(int flags) {
         
         // TODO swap hot data to RocksDB
 
-        rocksClose();
+        swapRelease();
     }
 
     /* Fire the shutdown modules event. */
@@ -5596,6 +5600,22 @@ sds genRedisInfoString(const char *section) {
                                   everything || modules ? NULL: section,
                                   0, /* not a crash report */
                                   sections);
+    }
+
+    if (allsections || defsections || !strcasecmp(section,"swap")) {
+        if (sections++) info = sdscat(info,"\r\n");
+        info = sdscatprintf(info,
+        "# Swap\r\n"
+        "swap_enabled:%d\r\n"
+        "stat_swap_in_keys_total:%lld\r\n"
+        "stat_swap_in_empty_keys_skipped:%lld\r\n"
+        "stat_swap_in_expired_keys_skipped:%lld\r\n"
+        "stat_swap_out_keys_total:%lld\r\n",
+        server.swap_enabled,
+        server.stat_swap_in_keys_total,
+        server.stat_swap_in_empty_keys_skipped,
+        server.stat_swap_in_expired_keys_skipped,
+        server.stat_swap_out_keys_total);
     }
     return info;
 }
