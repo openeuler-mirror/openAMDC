@@ -11,6 +11,7 @@
  */
 
 #include "server.h"
+#include "swap.h"
 
 /* -----------------------------------------------------------------------------
  * Helpers and low level bit functions.
@@ -541,6 +542,7 @@ void setbitCommand(client *c) {
     ((uint8_t*)o->ptr)[byte] = byteval;
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_STRING,"setbit",c->argv[1],c->db->id);
+    swapOut(c->argv[1], c->db->id);
     server.dirty++;
     addReply(c, bitval ? shared.cone : shared.czero);
 }
@@ -752,11 +754,13 @@ void bitopCommand(client *c) {
         o = createObject(OBJ_STRING,res);
         setKey(c,c->db,targetkey,o);
         notifyKeyspaceEvent(NOTIFY_STRING,"set",targetkey,c->db->id);
+        swapOut(targetkey, c->db->id);
         decrRefCount(o);
         server.dirty++;
     } else if (dbDelete(c->db,targetkey)) {
         signalModifiedKey(c,c->db,targetkey);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",targetkey,c->db->id);
+        swapDel(targetkey, c->db->id);
         server.dirty++;
     }
     addReplyLongLong(c,maxlen); /* Return the output string length in bytes. */
@@ -1134,6 +1138,7 @@ void bitfieldGeneric(client *c, int flags) {
     if (changes) {
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_STRING,"setbit",c->argv[1],c->db->id);
+        swapOut(c->argv[1], c->db->id); 
         server.dirty += changes;
     }
     zfree(ops);

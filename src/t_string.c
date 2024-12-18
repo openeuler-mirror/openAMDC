@@ -11,6 +11,7 @@
  */
 
 #include "server.h"
+#include "swap.h"
 #include <math.h> /* isnan(), isinf() */
 
 /* Forward declarations */
@@ -97,9 +98,11 @@ void setGenericCommand(client *c, int flags, robj *key, robj *val, robj *expire,
     genericSetKey(c,c->db,key, val,flags & OBJ_KEEPTTL,1);
     server.dirty++;
     notifyKeyspaceEvent(NOTIFY_STRING,"set",key,c->db->id);
+    swapOut(key, c->db->id);
     if (expire) {
         setExpire(c,c->db,key,when);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"expire",key,c->db->id);
+        swapOut(key, c->db->id);
 
         /* Propagate as SET Key Value PXAT millisecond-timestamp if there is EXAT/PXAT or
          * propagate as SET Key Value PX millisecond if there is EX/PX flag.
@@ -364,6 +367,7 @@ void getexCommand(client *c) {
         rewriteClientCommandVector(c,2,aux,c->argv[1]);
         signalModifiedKey(c, c->db, c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_GENERIC, "del", c->argv[1], c->db->id);
+        swapDel(c->argv[1], c->db->id);
         server.dirty++;
     } else if (expire) {
         setExpire(c,c->db,c->argv[1],when);
@@ -374,12 +378,14 @@ void getexCommand(client *c) {
         decrRefCount(millisecondObj);
         signalModifiedKey(c, c->db, c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"expire",c->argv[1],c->db->id);
+        swapOut(c->argv[1], c->db->id);
         server.dirty++;
     } else if (flags & OBJ_PERSIST) {
         if (removeExpire(c->db, c->argv[1])) {
             signalModifiedKey(c, c->db, c->argv[1]);
             rewriteClientCommandVector(c, 2, shared.persist, c->argv[1]);
             notifyKeyspaceEvent(NOTIFY_GENERIC,"persist",c->argv[1],c->db->id);
+            swapOut(c->argv[1], c->db->id);
             server.dirty++;
         }
     }
@@ -401,6 +407,7 @@ void getsetCommand(client *c) {
     c->argv[2] = tryObjectEncoding(c->argv[2]);
     setKey(c,c->db,c->argv[1],c->argv[2]);
     notifyKeyspaceEvent(NOTIFY_STRING,"set",c->argv[1],c->db->id);
+    swapOut(c->argv[1], c->db->id);
     server.dirty++;
 
     /* Propagate as SET command */
@@ -462,6 +469,7 @@ void setrangeCommand(client *c) {
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_STRING,
             "setrange",c->argv[1],c->db->id);
+        swapOut(c->argv[1], c->db->id);
         server.dirty++;
     }
     addReplyLongLong(c,sdslen(o->ptr));
@@ -549,6 +557,7 @@ void msetGenericCommand(client *c, int nx) {
         c->argv[j+1] = tryObjectEncoding(c->argv[j+1]);
         setKey(c,c->db,c->argv[j],c->argv[j+1]);
         notifyKeyspaceEvent(NOTIFY_STRING,"set",c->argv[j],c->db->id);
+        swapOut(c->argv[j], c->db->id);
     }
     server.dirty += (c->argc-1)/2;
     addReply(c, nx ? shared.cone : shared.ok);
@@ -594,6 +603,7 @@ void incrDecrCommand(client *c, long long incr) {
     }
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_STRING,"incrby",c->argv[1],c->db->id);
+    swapOut(c->argv[1], c->db->id);
     server.dirty++;
     addReplyLongLong(c, value);
 }
@@ -647,6 +657,7 @@ void incrbyfloatCommand(client *c) {
         dbAdd(c->db,c->argv[1],new);
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_STRING,"incrbyfloat",c->argv[1],c->db->id);
+    swapOut(c->argv[1], c->db->id); 
     server.dirty++;
     addReplyBulk(c,new);
 
@@ -686,6 +697,7 @@ void appendCommand(client *c) {
     }
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_STRING,"append",c->argv[1],c->db->id);
+    swapOut(c->argv[1], c->db->id);
     server.dirty++;
     addReplyLongLong(c,totlen);
 }

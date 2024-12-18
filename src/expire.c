@@ -11,6 +11,7 @@
  */
 
 #include "server.h"
+#include "swap.h"
 
 /*-----------------------------------------------------------------------------
  * Incremental collection of expired keys.
@@ -512,6 +513,7 @@ void expireGenericCommand(client *c, long long basetime, int unit) {
         rewriteClientCommandVector(c,2,aux,key);
         signalModifiedKey(c,c->db,key);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",key,c->db->id);
+        swapDel(key, c->db->id);    
         addReply(c, shared.cone);
         return;
     } else {
@@ -519,6 +521,7 @@ void expireGenericCommand(client *c, long long basetime, int unit) {
         addReply(c,shared.cone);
         signalModifiedKey(c,c->db,key);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"expire",key,c->db->id);
+        swapOut(key, c->db->id);    
         server.dirty++;
         return;
     }
@@ -584,6 +587,7 @@ void persistCommand(client *c) {
         if (removeExpire(c->db,c->argv[1])) {
             signalModifiedKey(c,c->db,c->argv[1]);
             notifyKeyspaceEvent(NOTIFY_GENERIC,"persist",c->argv[1],c->db->id);
+            swapOut(c->argv[1], c->db->id);  
             addReply(c,shared.cone);
             server.dirty++;
         } else {

@@ -134,103 +134,6 @@ void rocksClose(void) {
     rocksdb_close(rocks->db);
 }
 
-/* Creates an adaptive LRU cache. */
-adaptiveLRU *adaptiveLRUCreate(void) {
-    struct adaptiveLRU *al;
-
-    if ((al = zmalloc(sizeof(*al))) == NULL)
-        return NULL;
-    al->warm_aligned_list = listCreate();
-    al->warm_unaligned_list = listCreate();
-    al->hot_aligned_list = listCreate();
-    al->hot_unaligned_list = listCreate();
-    return al;
-}
-
-/* Releases the adaptive LRU cache. */
-void adaptiveLRURelease(adaptiveLRU *al) {
-    listRelease(al->warm_aligned_list);
-    listRelease(al->warm_unaligned_list);
-    listRelease(al->hot_aligned_list);
-    listRelease(al->hot_unaligned_list);
-    zfree(al);
-}
-
-/* Adds a node to the adaptive LRU cache. */
-listNode *adaptiveLRUAdd(adaptiveLRU *al, void *val, int to) {
-    list *targetList = NULL;
-
-    switch (to) {
-        case AL_WARM_ALIGNED_LOC: targetList = al->warm_aligned_list; break;
-        case AL_WARM_UNALIGNED_LOC: targetList = al->warm_unaligned_list; break;
-        case AL_HOT_ALIGNED_LOC: targetList = al->hot_aligned_list; break;
-        case AL_HOT_UNALIGNED_LOC: targetList = al->hot_unaligned_list; break;
-        default: serverPanic("Invalid adaptiveLRU type");
-    }
-
-    if (listAddNodeHead(targetList, val) == NULL)
-        return NULL;
-    else
-        return listFirst(targetList);
-}
-
-/* Moves a node between lists in the adaptive LRU cache. */
-listNode *moveNode(adaptiveLRU *al, listNode *node, int *from, int to) {
-    void *val = node->value;
-    adaptiveLRUDel(al, node, *from);
-
-    *from = to;
-    listNode *newNode = adaptiveLRUAdd(al, val, to);
-    if (!newNode) {
-        serverPanic("Failed to add node to list");
-    }
-    return newNode;
-}
-
-/* Converts a node in the adaptive LRU cache based on read/write operations. */
-listNode *adaptiveLRUConvert(adaptiveLRU *al, listNode *node, int *from, int rw) {
-    if (rw == AL_READ) {
-        switch (*from) {
-            case AL_WARM_ALIGNED_LOC:
-                return moveNode(al, node, from, AL_HOT_ALIGNED_LOC);
-            case AL_HOT_ALIGNED_LOC:
-                return moveNode(al, node, from, AL_HOT_ALIGNED_LOC);
-            case AL_WARM_UNALIGNED_LOC:
-                return moveNode(al, node, from, AL_HOT_UNALIGNED_LOC);
-            case AL_HOT_UNALIGNED_LOC:
-                return moveNode(al, node, from, AL_HOT_UNALIGNED_LOC);
-            default:
-                serverPanic("Invalid from value");
-        }
-    } else if (rw == AL_WRITE) {
-        switch (*from) {
-            case AL_WARM_ALIGNED_LOC:
-                return moveNode(al, node, from, AL_HOT_UNALIGNED_LOC);
-            case AL_HOT_ALIGNED_LOC:
-                return moveNode(al, node, from, AL_HOT_UNALIGNED_LOC);
-            case AL_WARM_UNALIGNED_LOC:
-                return moveNode(al, node, from, AL_HOT_UNALIGNED_LOC);
-            case AL_HOT_UNALIGNED_LOC:
-                return moveNode(al, node, from, AL_HOT_UNALIGNED_LOC);
-            default:
-                serverPanic("Invalid from value");
-        }
-    } else {
-        serverPanic("Invalid rw value");
-    }
-}
-
-/* Deletes a node from the adaptive LRU cache. */
-void adaptiveLRUDel(adaptiveLRU *al, listNode *node, int from) {
-    switch(from) {
-        case AL_WARM_ALIGNED_LOC: listDelNode(al->warm_aligned_list, node); break;
-        case AL_WARM_UNALIGNED_LOC: listDelNode(al->warm_unaligned_list, node); break;
-        case AL_HOT_ALIGNED_LOC: listDelNode(al->hot_aligned_list, node); break;
-        case AL_HOT_UNALIGNED_LOC: listDelNode(al->hot_unaligned_list, node); break;
-        default: serverPanic("Invalid adaptiveLRU type");
-    }
-}
-
 /* Creates and sets up the necessary resources for data retrieval in the swap process */
 swapDataRetrieval *swapDataRetrievalCreate(int dbid, robj *val, long long expiretime, long long lfu_freq) {
     swapDataRetrieval *r = zmalloc(sizeof(swapDataRetrieval));
@@ -248,13 +151,14 @@ void swapDataRetrievalRelease(swapDataRetrieval *r) {
 }
 
 /* Creates a new data entry for the swap process. */
-swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, long long expiretime) {
+swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, long long expiretime, uint64_t version) {
     swapDataEntry *req = zmalloc(sizeof(swapDataEntry));
     req->intention = intention;
     req->dbid = dbid;
     req->key = key;
     req->val = NULL;
     req->expiretime = expiretime;
+    req->version = version;
     incrRefCount(key);
     return req;
 }
@@ -367,7 +271,6 @@ rerr:
 /* Initializes the swap state */
 void swapInit(void) {
     server.swap = zmalloc(sizeof(*server.swap));    
-    server.swap->al = adaptiveLRUCreate();
     server.swap->swap_data_version = 0;
 
     if (rocksInit() == C_ERR) {
@@ -403,4 +306,124 @@ void swapRelease(void) {
         }
     }
     rocksClose();
+}
+
+/* Retrieving an object from the swap database (RocksDB) and adding it back
+ * into the memory. It involves decoding the object data, checking expiration
+ * times, and updating object metadata such as frequency of use.*/
+robj *swapIn(robj *key, int dbid) {
+    char *val;
+    size_t vallen;
+    char *err = NULL;
+    robj *o = NULL;
+    swapDataRetrieval *r;
+    mstime_t swap_latency;
+    long long expiretime, lfu_freq;
+
+    /* Start monitoring the latency for the swap-in operation. */
+    latencyStartMonitor(swap_latency);
+
+    /* Use RocksDB to get the value associated with the key from the specified cf_handles. */
+    val = rocksdb_get_cf(server.swap->rocks->db,
+                         server.swap->rocks->ropts,
+                         server.swap->rocks->cf_handles[dbid],
+                         key->ptr, sdslen(key->ptr),
+                         &vallen,
+                         &err);
+    if (err != NULL) {
+        serverLog(LL_WARNING, "Rocksdb get key error, key:%s, err: %s", (sds)key->ptr, err);
+        return NULL;
+    }
+
+    /* Decode the retrieved data， if decoding fails, free the allocated memory and return NULL. */
+    if ((r = swapDataDecodeObject(key, val, vallen)) == NULL) { 
+        zlibc_free(val);
+        return NULL;
+    } else {
+        o = r->val;
+        expiretime = r->expiretime;
+        lfu_freq = r->lfu_freq;
+        swapDataRetrievalRelease(r);
+    }
+
+    /* If the current server is the master and the object has expired, delete the object from
+     * RocksDB and free the object.*/
+    if (iAmMaster() &&
+        expiretime != -1 && expiretime < mstime()) {
+        decrRefCount(o);
+        rocksdb_delete_cf(server.swap->rocks->db,
+                          server.swap->rocks->wopts,
+                          server.swap->rocks->cf_handles[dbid],
+                          key->ptr,
+                          sdslen(key->ptr),
+                          &err);
+        if (err != NULL) {
+            serverLog(LL_WARNING, "Rocksdb delete key error, key:%s, err: %s", (sds)key->ptr, err);
+            return NULL;
+        }
+        server.stat_swap_in_expired_keys_skipped++;
+    } else {
+        /* Add the new object in the hash table */
+        int added = dbAddRDBLoad(server.db+dbid,key->ptr,o);
+        if (!added) {
+            serverLog(LL_WARNING,"Rocksdb has duplicated key '%s' in DB %d",(sds)key->ptr,dbid);
+            serverPanic("Duplicated key found in Rocksdb");
+        }
+
+        /* Set the expire time if needed */
+        if (expiretime != -1) {
+            setExpire(NULL, server.db+dbid, key, expiretime);
+        }
+
+        /* Set usage information (for eviction). */
+        objectSetLRUOrLFU(o, lfu_freq, -1, LRU_CLOCK(), 1000);
+    }
+
+    zlibc_free(val);
+    latencyEndMonitor(swap_latency);
+    latencyAddSampleIfNeeded("swap-in", swap_latency);
+    server.stat_swap_in_keys_total++;
+    return o;
+}
+
+/* A general function to attempt data swapping. */
+static void swapData(int intention, int dbid, robj *key) {
+    /* Check if the server has swap functionality enabled,
+     * return immediately if not */
+    if (!server.swap_enabled) return;
+    
+    if (!server.maxmemory) {
+        /* If the intention of the swap operation is to swap
+         * out, retrieve the expiration time of the key */
+        long long expire = -1;
+        if (intention == SWAP_OUT)
+            expire = getExpire(server.db+dbid, key);
+        /* Get and increment the swap data version number,
+         * used to track the order of swap operations */
+        uint64_t version = server.swap->swap_data_version++;
+        /* Create a swap data entry object, encapsulating
+         * the relevant information for the swap operation */
+        swapDataEntry *entry = swapDataEntryCreate(intention, dbid, key, expire, version);
+        /* Add the created swap data entry to the tail of
+         * the pending requests list for the current thread*/
+        listAddNodeTail(server.swap->pending_reqs[threadId], entry);
+    }
+}
+
+/* Executes a data swap-out operation. */
+void swapOut(robj* key, int dbid) {
+    /* If swap is not enabled, return immediately. */
+    if (!server.swap_enabled) return;
+    /* Call swapData function with SWAP_OUT operation
+     * to move the swap-out process. */
+    swapData(SWAP_OUT, dbid, key);
+}
+
+/* Executes a data swap delete operation. */
+void swapDel(robj *key, int dbid) {
+    /* If swap is not enabled, return immediately. */
+    if (!server.swap_enabled) return;
+    /* Call swapData function with SWAP_DEL operation
+     * to delete the key from swap. */
+    swapData(SWAP_DEL, dbid, key);
 }

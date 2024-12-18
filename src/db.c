@@ -12,6 +12,7 @@
 
 #include "server.h"
 #include "cluster.h"
+#include "swap.h"
 #include "atomicvar.h"
 #include "latency.h"
 
@@ -674,6 +675,7 @@ void delGenericCommand(client *c, int lazy) {
             signalModifiedKey(c,c->db,c->argv[j]);
             notifyKeyspaceEvent(NOTIFY_GENERIC,
                 "del",c->argv[j],c->db->id);
+            swapDel(c->argv[j], c->db->id);
             server.dirty++;
             numdel++;
         }
@@ -1109,6 +1111,8 @@ void renameGenericCommand(client *c, int nx) {
         c->argv[1],c->db->id);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"rename_to",
         c->argv[2],c->db->id);
+    swapDel(c->argv[1], c->db->id);
+    swapOut(c->argv[2], c->db->id);
     server.dirty++;
     addReply(c,nx ? shared.cone : shared.ok);
 }
@@ -1176,9 +1180,10 @@ void moveCommand(client *c) {
     signalModifiedKey(c,dst,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_GENERIC,
                 "move_from",c->argv[1],src->id);
+    swapDel(c->argv[1], src->id);
     notifyKeyspaceEvent(NOTIFY_GENERIC,
                 "move_to",c->argv[1],dst->id);
-
+    swapOut(c->argv[1], dst->id);
     server.dirty++;
     addReply(c,shared.cone);
 }
@@ -1280,7 +1285,7 @@ void copyCommand(client *c) {
     /* OK! key copied */
     signalModifiedKey(c,dst,c->argv[2]);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"copy_to",c->argv[2],dst->id);
-
+    swapOut(c->argv[2], c->db->id);
     server.dirty++;
     addReply(c,shared.cone);
 }

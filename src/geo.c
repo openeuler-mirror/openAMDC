@@ -14,6 +14,7 @@
 #include "geohash_helper.h"
 #include "debugmacro.h"
 #include "pqsort.h"
+#include "swap.h"
 
 /* Things exported from t_zset.c only for geo.c, since it is the only other
  * part of openAMDC that requires close zset introspection. */
@@ -807,10 +808,12 @@ void georadiusGeneric(client *c, int srcKeyIndex, int flags) {
             decrRefCount(zobj);
             notifyKeyspaceEvent(NOTIFY_ZSET,flags & GEOSEARCH ? "geosearchstore" : "georadiusstore",storekey,
                                 c->db->id);
+            swapOut(storekey, c->db->id);
             server.dirty += returned_items;
         } else if (dbDelete(c->db,storekey)) {
             signalModifiedKey(c,c->db,storekey);
             notifyKeyspaceEvent(NOTIFY_GENERIC,"del",storekey,c->db->id);
+            swapDel(storekey, c->db->id);
             server.dirty++;
         }
         addReplyLongLong(c, returned_items);

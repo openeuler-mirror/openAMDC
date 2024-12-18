@@ -11,6 +11,7 @@
  */
 
 #include "server.h"
+#include "swap.h"
 
 #define LIST_MAX_ITEM_SIZE ((1ull<<32)-1024)
 
@@ -240,6 +241,7 @@ void pushGenericCommand(client *c, int where, int xx) {
     char *event = (where == LIST_HEAD) ? "lpush" : "rpush";
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_LIST,event,c->argv[1],c->db->id);
+    swapOut(c->argv[1], c->db->id);
 }
 
 /* LPUSH <key> <element> [<element> ...] */
@@ -302,6 +304,7 @@ void linsertCommand(client *c) {
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_LIST,"linsert",
                             c->argv[1],c->db->id);
+        swapOut(c->argv[1], c->db->id);
         server.dirty++;
     } else {
         /* Notify client of a failed insert */
@@ -369,6 +372,7 @@ void lsetCommand(client *c) {
             addReply(c,shared.ok);
             signalModifiedKey(c,c->db,c->argv[1]);
             notifyKeyspaceEvent(NOTIFY_LIST,"lset",c->argv[1],c->db->id);
+            swapOut(c->argv[1], c->db->id); 
             server.dirty++;
         }
     } else {
@@ -429,6 +433,9 @@ void listElementsRemoved(client *c, robj *key, int where, robj *o, long count) {
     if (listTypeLength(o) == 0) {
         notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, c->db->id);
         dbDelete(c->db, key);
+        swapDel(c->argv[1], c->db->id);
+    } else if (count) {
+        swapOut(c->argv[1], c->db->id);
     }
     signalModifiedKey(c, c->db, key);
     server.dirty += count;
@@ -514,6 +521,7 @@ void lrangeCommand(client *c) {
 void ltrimCommand(client *c) {
     robj *o;
     long start, end, llen, ltrim, rtrim;
+    int deleted = 0;
 
     if ((getLongFromObjectOrReply(c, c->argv[2], &start, NULL) != C_OK) ||
         (getLongFromObjectOrReply(c, c->argv[3], &end, NULL) != C_OK)) return;
@@ -541,8 +549,8 @@ void ltrimCommand(client *c) {
 
     /* Remove list elements to perform the trim */
     if (o->encoding == OBJ_ENCODING_QUICKLIST) {
-        quicklistDelRange(o->ptr,0,ltrim);
-        quicklistDelRange(o->ptr,-rtrim,rtrim);
+        deleted += quicklistDelRange(o->ptr,0,ltrim);
+        deleted += quicklistDelRange(o->ptr,-rtrim,rtrim);
     } else {
         serverPanic("Unknown list encoding");
     }
@@ -551,6 +559,9 @@ void ltrimCommand(client *c) {
     if (listTypeLength(o) == 0) {
         dbDelete(c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
+        swapDel(c->argv[1], c->db->id);
+    } else if (deleted) {
+        swapOut(c->argv[1], c->db->id);
     }
     signalModifiedKey(c,c->db,c->argv[1]);
     server.dirty += (ltrim + rtrim);
@@ -738,6 +749,7 @@ void lmoveHandlePush(client *c, robj *dstkey, robj *dstobj, robj *value,
                         where == LIST_HEAD ? "lpush" : "rpush",
                         dstkey,
                         c->db->id);
+    swapOut(dstkey, c->db->id);
     /* Always send the pushed value to the client. */
     addReplyBulk(c,value);
 }
@@ -793,6 +805,7 @@ void lmoveGenericCommand(client *c, int wherefrom, int whereto) {
             dbDelete(c->db,touchedkey);
             notifyKeyspaceEvent(NOTIFY_GENERIC,"del",
                                 touchedkey,c->db->id);
+            swapDel(touchedkey, c->db->id);
         }
         signalModifiedKey(c,c->db,touchedkey);
         server.dirty++;

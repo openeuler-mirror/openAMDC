@@ -12,6 +12,7 @@
 
 #include "server.h"
 #include "pqsort.h" /* Partial qsort for SORT+LIMIT */
+#include "swap.h"
 #include <math.h> /* isnan() */
 
 zskiplistNode* zslGetElementByRank(zskiplist *zsl, unsigned long rank);
@@ -556,10 +557,12 @@ void sortCommand(client *c) {
             setKey(c,c->db,storekey,sobj);
             notifyKeyspaceEvent(NOTIFY_LIST,"sortstore",storekey,
                                 c->db->id);
+            swapOut(storekey, c->db->id);
             server.dirty += outputlen;
         } else if (dbDelete(c->db,storekey)) {
             signalModifiedKey(c,c->db,storekey);
             notifyKeyspaceEvent(NOTIFY_GENERIC,"del",storekey,c->db->id);
+            swapDel(storekey, c->db->id);
             server.dirty++;
         }
         decrRefCount(sobj);

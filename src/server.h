@@ -679,12 +679,6 @@ typedef struct redisObject {
     void *ptr;
 } robj;
 
-typedef struct redisObjectAugmented {
-    uint64_t loc:2;
-    uint64_t version:62;
-    listNode *node;
-} robjAug;
-
 /* The a string name for an object's type as listed above
  * Native types are checked against the OBJ_STRING, OBJ_LIST, OBJ_* defines,
  * and Module types have their registered name returned. */
@@ -2049,12 +2043,6 @@ void afterPropagateExec();
 void decrRefCount(robj *o);
 void decrRefCountVoid(void *o);
 void incrRefCount(robj *o);
-uint64_t getVersion(robj* o);
-void setVersion(robj *o, uint64_t version);
-uint16_t getLoc(robj* o);
-void setLoc(robj *o, uint16_t loc);
-listNode *getNode(robj* o);
-void setNode(robj *o, listNode *node);
 robj *makeObjectShared(robj *o);
 robj *resetRefCount(robj *obj);
 void freeStringObject(robj *o);

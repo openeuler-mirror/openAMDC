@@ -11,6 +11,7 @@
  */
 
 #include "server.h"
+#include "swap.h"
 #include "endianconv.h"
 #include "stream.h"
 
@@ -1821,12 +1822,14 @@ void xaddCommand(client *c) {
 
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_STREAM,"xadd",c->argv[1],c->db->id);
+    swapOut(c->argv[1], c->db->id);    
     server.dirty++;
 
     /* Trim if needed. */
     if (parsed_args.trim_strategy != TRIM_STRATEGY_NONE) {
         if (streamTrim(s, &parsed_args)) {
             notifyKeyspaceEvent(NOTIFY_STREAM,"xtrim",c->argv[1],c->db->id);
+            swapOut(c->argv[1], c->db->id);
         }
         if (parsed_args.approx_trim) {
             /* In case our trimming was limited (by LIMIT or by ~) we must
@@ -2438,6 +2441,7 @@ NULL
             server.dirty++;
             notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-create",
                                 c->argv[2],c->db->id);
+            swapOut(c->argv[2], c->db->id);
         } else {
             addReplyError(c,"-BUSYGROUP Consumer Group name already exists");
         }
@@ -2452,6 +2456,7 @@ NULL
         addReply(c,shared.ok);
         server.dirty++;
         notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-setid",c->argv[2],c->db->id);
+        swapOut(c->argv[2], c->db->id);
     } else if (!strcasecmp(opt,"DESTROY") && c->argc == 4) {
         if (cg) {
             raxRemove(s->cgroups,(unsigned char*)grpname,sdslen(grpname),NULL);
@@ -2460,6 +2465,7 @@ NULL
             server.dirty++;
             notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-destroy",
                                 c->argv[2],c->db->id);
+            swapOut(c->argv[2], c->db->id);
             /* We want to unblock any XREADGROUP consumers with -NOGROUP. */
             signalKeyAsReady(c->db,c->argv[2],OBJ_STREAM);
         } else {
@@ -2472,6 +2478,7 @@ NULL
             server.dirty++;
             notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-createconsumer",
                                 c->argv[2],c->db->id);
+            swapOut(c->argv[2], c->db->id);
         }
         addReplyLongLong(c,created);
     } else if (!strcasecmp(opt,"DELCONSUMER") && c->argc == 5) {
@@ -2482,6 +2489,7 @@ NULL
         server.dirty++;
         notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-delconsumer",
                             c->argv[2],c->db->id);
+        swapOut(c->argv[2], c->db->id);
     } else {
         addReplySubcommandSyntaxError(c);
     }
@@ -2515,6 +2523,7 @@ void xsetidCommand(client *c) {
     addReply(c,shared.ok);
     server.dirty++;
     notifyKeyspaceEvent(NOTIFY_STREAM,"xsetid",c->argv[1],c->db->id);
+    swapOut(c->argv[1], c->db->id);
 }
 
 /* XACK <key> <group> <id> <id> ... <id>
@@ -3212,6 +3221,7 @@ void xdelCommand(client *c) {
     if (deleted) {
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_STREAM,"xdel",c->argv[1],c->db->id);
+        swapOut(c->argv[1], c->db->id);
         server.dirty += deleted;
     }
     addReplyLongLong(c,deleted);

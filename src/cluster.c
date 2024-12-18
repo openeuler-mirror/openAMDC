@@ -12,6 +12,7 @@
 
 #include "server.h"
 #include "cluster.h"
+#include "swap.h"
 #include "endianconv.h"
 
 #include <sys/types.h>
@@ -5211,6 +5212,7 @@ void restoreCommand(client *c) {
             rewriteClientCommandVector(c,2,shared.del,key);
             signalModifiedKey(c,c->db,key);
             notifyKeyspaceEvent(NOTIFY_GENERIC,"del",key,c->db->id);
+            swapDel(key, c->db->id);    
             server.dirty++;
         }
         decrRefCount(obj);
@@ -5226,6 +5228,7 @@ void restoreCommand(client *c) {
     objectSetLRUOrLFU(obj,lfu_freq,lru_idle,lru_clock,1000);
     signalModifiedKey(c,c->db,key);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"restore",key,c->db->id);
+    swapOut(key, c->db->id);    
     addReply(c,shared.ok);
     server.dirty++;
 }
