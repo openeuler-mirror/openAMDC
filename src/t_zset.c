@@ -1826,7 +1826,7 @@ cleanup:
         signalModifiedKey(c,c->db,key);
         notifyKeyspaceEvent(NOTIFY_ZSET,
             incr ? "zincr" : "zadd", key, c->db->id);
-        swapOut(key, c->db->id);
+        swapOut(key, zobj, c->db->id);
     }
 }
 
@@ -1861,7 +1861,7 @@ void zremCommand(client *c) {
             notifyKeyspaceEvent(NOTIFY_GENERIC,"del",key,c->db->id);
             swapDel(key, c->db->id);
         } else {
-            swapOut(key, c->db->id);
+            swapOut(key, zobj, c->db->id);
         }
         signalModifiedKey(c,c->db,key);
         server.dirty += deleted;
@@ -1978,7 +1978,7 @@ void zremrangeGenericCommand(client *c, zrange_type rangetype) {
             swapDel(key, c->db->id);
         } else {
             notifyKeyspaceEvent(NOTIFY_ZSET,notify_type,key,c->db->id);
-            swapOut(key, c->db->id);
+            swapOut(key, zobj, c->db->id);
         }
     }
     server.dirty += deleted;
@@ -2794,7 +2794,7 @@ void zunionInterDiffGenericCommand(client *c, robj *dstkey, int numkeysIndex, in
                                 (op == SET_OP_UNION) ? "zunionstore" :
                                     (op == SET_OP_INTER ? "zinterstore" : "zdiffstore"),
                                 dstkey, c->db->id);
-            swapOut(dstkey, c->db->id); 
+            swapOut(dstkey, dstobj, c->db->id); 
             server.dirty++;
         } else {
             addReply(c, shared.czero);
@@ -2994,7 +2994,7 @@ static void zrangeResultFinalizeStore(zrange_result_handler *handler, size_t res
         setKey(handler->client, handler->client->db, handler->dstkey, handler->dstobj);
         addReplyLongLong(handler->client, result_count);
         notifyKeyspaceEvent(NOTIFY_ZSET, "zrangestore", handler->dstkey, handler->client->db->id);
-        swapOut(handler->dstkey, handler->client->db->id);
+        swapOut(handler->dstkey, handler->dstobj, handler->client->db->id);
         server.dirty++;
     } else {
         addReply(handler->client, shared.czero);

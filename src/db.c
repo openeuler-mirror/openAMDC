@@ -1112,7 +1112,7 @@ void renameGenericCommand(client *c, int nx) {
     notifyKeyspaceEvent(NOTIFY_GENERIC,"rename_to",
         c->argv[2],c->db->id);
     swapDel(c->argv[1], c->db->id);
-    swapOut(c->argv[2], c->db->id);
+    swapOut(c->argv[2], o, c->db->id);
     server.dirty++;
     addReply(c,nx ? shared.cone : shared.ok);
 }
@@ -1183,7 +1183,7 @@ void moveCommand(client *c) {
     swapDel(c->argv[1], src->id);
     notifyKeyspaceEvent(NOTIFY_GENERIC,
                 "move_to",c->argv[1],dst->id);
-    swapOut(c->argv[1], dst->id);
+    swapOut(c->argv[1], o, dst->id);
     server.dirty++;
     addReply(c,shared.cone);
 }
@@ -1285,7 +1285,7 @@ void copyCommand(client *c) {
     /* OK! key copied */
     signalModifiedKey(c,dst,c->argv[2]);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"copy_to",c->argv[2],dst->id);
-    swapOut(c->argv[2], c->db->id);
+    swapOut(c->argv[2], newobj, c->db->id);
     server.dirty++;
     addReply(c,shared.cone);
 }

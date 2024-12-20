@@ -542,7 +542,7 @@ void setbitCommand(client *c) {
     ((uint8_t*)o->ptr)[byte] = byteval;
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_STRING,"setbit",c->argv[1],c->db->id);
-    swapOut(c->argv[1], c->db->id);
+    swapOut(c->argv[1], o, c->db->id);
     server.dirty++;
     addReply(c, bitval ? shared.cone : shared.czero);
 }
@@ -754,7 +754,7 @@ void bitopCommand(client *c) {
         o = createObject(OBJ_STRING,res);
         setKey(c,c->db,targetkey,o);
         notifyKeyspaceEvent(NOTIFY_STRING,"set",targetkey,c->db->id);
-        swapOut(targetkey, c->db->id);
+        swapOut(targetkey, o, c->db->id);
         decrRefCount(o);
         server.dirty++;
     } else if (dbDelete(c->db,targetkey)) {
@@ -1138,7 +1138,7 @@ void bitfieldGeneric(client *c, int flags) {
     if (changes) {
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_STRING,"setbit",c->argv[1],c->db->id);
-        swapOut(c->argv[1], c->db->id); 
+        swapOut(c->argv[1], o, c->db->id); 
         server.dirty += changes;
     }
     zfree(ops);

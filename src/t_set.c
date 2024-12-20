@@ -302,7 +302,7 @@ void saddCommand(client *c) {
     if (added) {
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_SET,"sadd",c->argv[1],c->db->id);
-        swapOut(c->argv[1], c->db->id);
+        swapOut(c->argv[1], set, c->db->id);
     }
     server.dirty += added;
     addReplyLongLong(c,added);
@@ -332,7 +332,7 @@ void sremCommand(client *c) {
             notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1], c->db->id);
             swapDel(c->argv[1], c->db->id);
         } else {
-            swapOut(c->argv[1], c->db->id);
+            swapOut(c->argv[1], set, c->db->id);
         }
         server.dirty += deleted;
     }
@@ -376,7 +376,7 @@ void smoveCommand(client *c) {
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
         swapDel(c->argv[1], c->db->id);
     } else {
-        swapOut(c->argv[1], c->db->id);
+        swapOut(c->argv[1], srcset, c->db->id);
     }
 
     /* Create the destination set when it doesn't exist */
@@ -393,7 +393,7 @@ void smoveCommand(client *c) {
         server.dirty++;
         signalModifiedKey(c,c->db,c->argv[2]);
         notifyKeyspaceEvent(NOTIFY_SET,"sadd",c->argv[2],c->db->id);
-        swapOut(c->argv[2], c->db->id);
+        swapOut(c->argv[2], dstset, c->db->id);
     }
     addReply(c,shared.cone);
 }
@@ -471,7 +471,7 @@ void spopWithCountCommand(client *c) {
 
     /* Generate an SPOP keyspace notification */
     notifyKeyspaceEvent(NOTIFY_SET,"spop",c->argv[1],c->db->id);
-    swapOut(c->argv[1], c->db->id);
+    swapOut(c->argv[1], set, c->db->id);
     server.dirty += (count >= size) ? size : count;
 
     /* CASE 1:
@@ -589,7 +589,6 @@ void spopWithCountCommand(client *c) {
      * the alsoPropagate() API. */
     preventCommandPropagation(c);
     signalModifiedKey(c,c->db,c->argv[1]);
-    swapOut(c->argv[1], c->db->id);
 }
 
 void spopCommand(client *c) {
@@ -638,7 +637,7 @@ void spopCommand(client *c) {
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
         swapDel(c->argv[1], c->db->id); 
     } else {
-        swapOut(c->argv[1], c->db->id);
+        swapOut(c->argv[1], ele, c->db->id);
     }
 
     /* Set has been modified */
@@ -974,7 +973,7 @@ void sinterGenericCommand(client *c, robj **setkeys,
             addReplyLongLong(c,setTypeSize(dstset));
             notifyKeyspaceEvent(NOTIFY_SET,"sinterstore",
                 dstkey,c->db->id);
-            swapOut(dstkey, c->db->id);
+            swapOut(dstkey, dstset, c->db->id);
             server.dirty++;
         } else {
             addReply(c,shared.czero);
@@ -1153,7 +1152,7 @@ void sunionDiffGenericCommand(client *c, robj **setkeys, int setnum,
             notifyKeyspaceEvent(NOTIFY_SET,
                 op == SET_OP_UNION ? "sunionstore" : "sdiffstore",
                 dstkey,c->db->id);
-            swapOut(dstkey, c->db->id);
+            swapOut(dstkey, dstset, c->db->id);
             server.dirty++;
         } else {
             addReply(c,shared.czero);

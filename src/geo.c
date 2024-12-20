@@ -808,7 +808,7 @@ void georadiusGeneric(client *c, int srcKeyIndex, int flags) {
             decrRefCount(zobj);
             notifyKeyspaceEvent(NOTIFY_ZSET,flags & GEOSEARCH ? "geosearchstore" : "georadiusstore",storekey,
                                 c->db->id);
-            swapOut(storekey, c->db->id);
+            swapOut(storekey, zobj, c->db->id);
             server.dirty += returned_items;
         } else if (dbDelete(c->db,storekey)) {
             signalModifiedKey(c,c->db,storekey);

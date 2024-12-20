@@ -21,6 +21,20 @@
 
 #define ROCKSDB_DIR "rocksdb.data"
 
+static sds swapDataEncodeObject(swapDataEntry *entry);
+static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len);
+
+/* Swap data entry batch filter type */
+dictType swapBatchFilterType = {
+    dictSdsHash,                /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictSdsKeyCompare,          /* key compare */
+    NULL,                       /* key destructor */
+    NULL,                       /* val destructor */
+    NULL,                       /* allow to expand */
+};
+
 /* Initializes the RocksDB database. */
 int rocksInit(void) {
     server.swap->rocks = zmalloc(sizeof(struct rocks));
@@ -151,57 +165,101 @@ void swapDataRetrievalRelease(swapDataRetrieval *r) {
 }
 
 /* Creates a new data entry for the swap process. */
-swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, long long expiretime, uint64_t version) {
+swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, robj *val, long long expiretime, uint64_t version) {
     swapDataEntry *req = zmalloc(sizeof(swapDataEntry));
     req->intention = intention;
     req->dbid = dbid;
     req->key = key;
-    req->val = NULL;
+    req->val = val;
     req->expiretime = expiretime;
     req->version = version;
     incrRefCount(key);
+    if (val)
+        incrRefCount(val);
     return req;
 }
 
 /* Releases the swapDataEntry. */
-void swapDataEntryRelease(swapDataEntry *e) {
-    if (e == NULL) return;
-    decrRefCount(e->key);
-    if (e->val)
-        decrRefCount(e->val);
-    zfree(e);
+void swapDataEntryRelease(swapDataEntry *entry) {
+    if (entry == NULL) return;
+    decrRefCount(entry->key);
+    if (entry->val)
+        decrRefCount(entry->val);
+    zfree(entry);
+}
+
+/* Submitting a swap data entry to a batch. It ensures that the entry's intention is valid,
+ * checks if the current batch is full, and either submits the batch or adds the entry to
+ * the batch accordingly. */
+static int swapDataEntrySubmit(swapDataEntry *entry, int idx) {
+    /* Ensure that the entry's intention is either SWAP_OUT or SWAP_DEL. */
+    serverAssert(entry->intention == SWAP_OUT || entry->intention == SWAP_DEL);
+
+    /* If the batch is not full, add the entry to the current batch. */
+    swapDataEntryBatchAdd(server.swap->batch[threadId], entry);
+
+    /* Check if the current batch for the thread has reached its maximum size. */
+    if (server.swap->batch[threadId]->count >= server.swap_data_entry_batch_size) {
+        /* If the batch is full, submit the current batch and handle any errors. */
+        if (swapDataEntryBatchSubmit(server.swap->batch[threadId], idx) == C_ERR)
+            return C_ERR;
+
+        /* Create a new batch for the thread after submitting the old one. */
+        server.swap->batch[threadId] = swapDataEntryBatchCreate();
+    }    
+
+    return C_OK;
+}
+
+static int swapMoveKeyOutOfMemory(swapDataEntry *entry) {
+    /* Ensure that the entry's intention is SAP_OUT. */
+    serverAssert(entry->intention == SWAP_OUT);
+    
+    /* If there are any expired keys in the database, remove this key from the expires dictionary. */
+    if (dictSize(server.db[entry->dbid].expires) > 0)
+        dictDelete(server.db[entry->dbid].expires,entry->key->ptr);
+    
+    /* Attempt to unlink the key from the main dictionary. */
+    dictEntry *de = dictUnlink(server.db[entry->dbid].dict, entry->key->ptr);
+    if (de) {
+        /* Free the unlinked dictionary entry to release resources. */
+        dictFreeUnlinkedEntry(server.db[entry->dbid].dict,de);
+        return 1;
+    } else {
+        return 0;
+    }
 }
 
 /* Encodes an object into a buffer for storage. */
-static sds swapDataEncodeObject(swapDataEntry *req) {
+static sds swapDataEncodeObject(swapDataEntry *entry) {
     uint8_t b[1];
     rio payload;
     int rdb_compression = server.rdb_compression;
     server.rdb_compression = 0;
 
-    serverAssert(server.maxmemory_policy & MAXMEMORY_FLAG_LFU);
+    serverAssert(server.swap->maxmemory_policy == SWAP_MAXMEMORY_FLAG_LFU);
 
     /* Init RIO */
     rioInitWithBuffer(&payload, sdsempty());
 
     /* Save the DB number */
     if (rdbSaveType(&payload, RDB_OPCODE_SELECTDB) == -1) goto werr;
-    if (rdbSaveLen(&payload, req->dbid) == -1) goto werr;
+    if (rdbSaveLen(&payload, entry->dbid) == -1) goto werr;
 
     /* Save the expire time */
-    if (req->expiretime != -1) {
+    if (entry->expiretime != -1) {
         if (rdbSaveType(&payload,RDB_OPCODE_EXPIRETIME_MS) == -1) goto werr;
-        if (rdbSaveMillisecondTime(&payload,req->expiretime) == -1) goto werr;
+        if (rdbSaveMillisecondTime(&payload,entry->expiretime) == -1) goto werr;
     }
 
     /* Save the LFU info. */
-    b[0] = LFUDecrAndReturn(req->val);
+    b[0] = LFUDecrAndReturn(entry->val);
     if (rdbSaveType(&payload, RDB_OPCODE_FREQ) == -1) goto werr;
     if (rioWrite(&payload, b,1) == 0) goto werr;
 
     /* Save type, value */
-    if (rdbSaveObjectType(&payload, req->val) == -1) goto werr;
-    if (rdbSaveObject(&payload, req->val, req->key) == -1) goto werr;
+    if (rdbSaveObjectType(&payload, entry->val) == -1) goto werr;
+    if (rdbSaveObject(&payload, entry->val, entry->key) == -1) goto werr;
 
     /* Save EOF */
     if (rdbSaveType(&payload, RDB_OPCODE_EOF) == -1) goto werr;
@@ -268,17 +326,158 @@ rerr:
     return NULL;
 }
 
-/* Initializes the swap state */
-void swapInit(void) {
-    server.swap = zmalloc(sizeof(*server.swap));    
-    server.swap->swap_data_version = 0;
+/* Create and initialize a swap data entry batch object. */
+swapDataEntryBatch *swapDataEntryBatchCreate(void) {
+    struct swapDataEntryBatch *eb = zmalloc(sizeof(swapDataEntryBatch));
+    eb->entries = eb->entry_buf;
+    eb->capacity = SWAP_DATA_ENTRY_BATCH_BUFFER_SIZE;
+    eb->count = 0;
+    return eb;
+}
 
+/* Release the resources associated with a swap data entry batch object. */
+void swapDataEntryBatchRelease(swapDataEntryBatch *eb) {
+    if (eb == NULL) return;
+    for (int i = 0; i < eb->count; i++) {
+        swapDataEntry *entry = eb->entries[i];
+        swapDataEntryRelease(entry);
+    }
+    if (eb->entries != eb->entry_buf) {
+        zfree(eb->entries);
+    }
+    zfree(eb);
+}
+
+/* Add a swap data entry to the batch. */
+void swapDataEntryBatchAdd(swapDataEntryBatch *eb, swapDataEntry *entry) {
+    /* Assert that the entry's intention is either SWAP_OUT or SWAP_DEL. */
+    serverAssert(entry->intention == SWAP_OUT || entry->intention == SWAP_DEL);
+    /* Check if the batch is full. */
+    if (eb->count == eb->capacity) {
+        /* Double the capacity of the entries buffer. */
+        eb->capacity = eb->capacity * 2;
+        serverAssert(eb->capacity > eb->count);
+
+        /* Check if the entries buffer is the initial internal buffer. */
+        if (eb->entries == eb->entry_buf) {
+            /* Allocate a new buffer with the increased capacity. */
+            eb->entries = zmalloc(sizeof(swapDataEntry *) * eb->capacity);
+            /* Copy the existing entries to the new buffer. */
+            memcpy(eb->entries, eb->entry_buf, sizeof(swapDataEntry *) * eb->count);
+        } else {
+            /* Reallocate the existing buffer with the increased capacity. */
+            eb->entries = zrealloc(eb->entry_buf, sizeof(swapDataEntry *) * eb->capacity);
+        }
+    }
+    /* Add the entry to the batch. */
+    eb->entries[eb->count++] = entry;
+}
+
+/* Submits a batch of swap data entries for processing. */
+int swapDataEntryBatchSubmit(swapDataEntryBatch *eb, int idx) {
+    /* Check if there are no swap flush threads running. */
+    if (server.swap_flush_threads_num == 0) {
+        /* Process the batch synchronously. */
+        int status = swapDataEntryBatchProcess(eb);
+        /* Release the batch after processing. */
+        swapDataEntryBatchRelease(eb);
+        /* Return the status of the batch processing. */
+        return status;
+    } else {
+        // TODO: Implement asynchronous swap processing
+    }
+
+    return C_OK;
+}
+
+/* Process a batch of swap data entries. */
+int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
+    /* Return immediately if there are no entries in the batch. */
+    if (eb->count == 0) return C_OK;
+
+    sds buf;
+    int status = C_OK;
+    char *err = NULL;
+    dictEntry *de;
+    dict *filter = dictCreate(&swapBatchFilterType, NULL);
+    rocksdb_writebatch_t *wb = rocksdb_writebatch_create();
+
+    /* Iterate over the entries in reverse order to add them to the filter dictionary. */
+    for (int i = eb->count-1; i >=0; i--) {
+        swapDataEntry *entry = eb->entries[i];
+        if ((de = dictFind(filter, entry->key->ptr)) == NULL) {
+            dictAdd(filter, entry->key->ptr, entry);
+        }
+    }
+
+    /* Process each entry in the filter dictionary. */
+    dictIterator *iter = dictGetIterator(filter);
+    while((de = dictNext(iter)) != NULL) {
+        swapDataEntry *entry = dictGetVal(de);
+        /* Handle entries with intention to swap out. */
+        if (entry->intention == SWAP_OUT) {
+            /* Encode the object associated with the entry. */
+            if ((buf = swapDataEncodeObject(entry)) == NULL) {
+                serverLog(LL_WARNING, "Swap data encode object failed, key:%s", (sds)entry->key->ptr);
+                status = C_ERR;
+                goto cleanup;
+            }
+            /* Add the encoded object to the RocksDB write batch. */
+            rocksdb_writebatch_put(wb, entry->key->ptr, sdslen(entry->key->ptr), buf, sdslen(buf));
+            /* Free the encoded buffer. */
+            sdsfree(buf);
+        /* Handle entries with intention to delete. */
+        } else if (entry->intention == SWAP_DEL) {
+            /* Delete the key from RocksDB using the write batch. */
+            rocksdb_writebatch_delete(wb, entry->key->ptr, sdslen(entry->key->ptr));
+        } else {
+            serverPanic("Invilid swap intention type: %d\n", entry->intention);
+        }
+    }
+
+    /* Write the batch to RocksDB. */
+    rocksdb_write(server.swap->rocks->db, server.swap->rocks->wopts, wb, &err);
+    if (err != NULL) {
+        serverLog(LL_WARNING, "Rocksdb write batch failed, err:%s", err);
+        zlibc_free(err);
+        status = C_ERR;
+    }
+
+    if (server.swap_flush_threads_num == 0) {
+        /* Iterate over each entry in the dictionary. */
+        iter = dictGetIterator(filter);
+        while((de = dictNext(iter)) != NULL) {
+            swapDataEntry *entry = dictGetVal(de);
+            /* Check if the entry's intention is SWAP_OUT. */
+            if (entry->intention == SWAP_OUT) {
+                /* Move the key out of memory according to the swap-out policy. */
+                swapMoveKeyOutOfMemory(entry);
+            }
+        }
+    }
+
+cleanup:
+    /* Release resources. */
+    dictReleaseIterator(iter);
+    dictRelease(filter);
+    rocksdb_writebatch_destroy(wb);
+    return status;
+}
+
+/* Initializes the swap state. */
+void swapInit(void) {
+    server.swap = zmalloc(sizeof(swapState));    
+    server.swap->swap_data_version = 0;
+    server.swap->maxmemory_policy = SWAP_MAXMEMORY_FLAG_LFU;
+
+    /* Initialize RocksDB and log a warning if initialization fails. */
     if (rocksInit() == C_ERR) {
         serverLog(LL_WARNING, "Failed to initialize RocksDB");
         exit(1);
     }
 
-    if (cuckooFilterInit(server.swap->cf, 
+    /* Initialize the Cuckoo Filter and log a warning if initialization fails. */
+    if (cuckooFilterInit(&server.swap->cf, 
                          server.swap_cuckoofilter_size_for_level /
                          server.swap_cuckoofilter_bucket_size /
                          sizeof(CuckooFingerprint),
@@ -289,10 +488,12 @@ void swapInit(void) {
         exit(1);
     }
 
+    /* Initialize swap data entry batches and pending entries lists for worker threads */
     for (int iel = 0; iel < MAX_THREAD_VAR; ++iel) {
         if (iel < server.worker_threads_num || 
             (iel == MODULE_THREAD_ID && server.worker_threads_num > 1)) {
-            server.swap->pending_reqs[iel] = listCreate();
+            server.swap->batch[iel] = swapDataEntryBatchCreate();
+            server.swap->pending_entries[iel] = listCreate();
         }
     }
 }
@@ -302,9 +503,13 @@ void swapRelease(void) {
     for (int iel = 0; iel < MAX_THREAD_VAR; ++iel) {
         if (iel < server.worker_threads_num || 
             (iel == MODULE_THREAD_ID && server.worker_threads_num > 1)) {
-            listRelease(server.swap->pending_reqs[iel]);
+            if (server.swap->batch[iel]) {
+                swapDataEntryBatchSubmit(server.swap->batch[iel], -1);
+            }
+            listRelease(server.swap->pending_entries[iel]);
         }
     }
+    cuckooFilterFree(&server.swap->cf);
     rocksClose();
 }
 
@@ -387,7 +592,7 @@ robj *swapIn(robj *key, int dbid) {
 }
 
 /* A general function to attempt data swapping. */
-static void swapData(int intention, int dbid, robj *key) {
+static void swapData(int intention, robj *key, robj *val, int dbid) {
     /* Check if the server has swap functionality enabled,
      * return immediately if not */
     if (!server.swap_enabled) return;
@@ -403,20 +608,20 @@ static void swapData(int intention, int dbid, robj *key) {
         uint64_t version = server.swap->swap_data_version++;
         /* Create a swap data entry object, encapsulating
          * the relevant information for the swap operation */
-        swapDataEntry *entry = swapDataEntryCreate(intention, dbid, key, expire, version);
+        swapDataEntry *entry = swapDataEntryCreate(intention, dbid, key, val, expire, version);
         /* Add the created swap data entry to the tail of
          * the pending requests list for the current thread*/
-        listAddNodeTail(server.swap->pending_reqs[threadId], entry);
+        listAddNodeTail(server.swap->pending_entries[threadId], entry);
     }
 }
 
 /* Executes a data swap-out operation. */
-void swapOut(robj* key, int dbid) {
+void swapOut(robj* key, robj *val, int dbid) {
     /* If swap is not enabled, return immediately. */
     if (!server.swap_enabled) return;
     /* Call swapData function with SWAP_OUT operation
      * to move the swap-out process. */
-    swapData(SWAP_OUT, dbid, key);
+    swapData(SWAP_OUT, key, val, dbid);
 }
 
 /* Executes a data swap delete operation. */
@@ -425,5 +630,27 @@ void swapDel(robj *key, int dbid) {
     if (!server.swap_enabled) return;
     /* Call swapData function with SWAP_DEL operation
      * to delete the key from swap. */
-    swapData(SWAP_DEL, dbid, key);
+    swapData(SWAP_DEL, key, NULL, dbid);
+}
+
+/* Process pending swap data entries for a specific thread. */
+void swapProcessPendingEntries(int iel) {
+    /* If there are no pending entries, return early. */
+    list *entries = server.swap->pending_entries[iel];
+    if (listLength(entries) == 0) return;
+
+    /* Iterate over the list of pending entries. */
+    listIter li;
+    listNode *ln;
+    listRewind(entries, &li);
+    while ((ln = listNext(&li))) {
+        swapDataEntry *e = listNodeValue(ln);
+        listDelNode(entries, ln);
+
+        /* Submit the swap data entry to the swap system. */
+        if (swapDataEntrySubmit(e, -1) == C_ERR) {
+            /* If submission fails, free the swap data entry. */
+            serverLog(LL_WARNING, "Failed to submit swap data entry");
+        }
+    }
 }

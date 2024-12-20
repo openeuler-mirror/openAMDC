@@ -636,7 +636,7 @@ void hsetnxCommand(client *c) {
         addReply(c, shared.cone);
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_HASH,"hset",c->argv[1],c->db->id);
-        swapOut(c->argv[1], c->db->id); 
+        swapOut(c->argv[1], o, c->db->id); 
         server.dirty++;
     }
 }
@@ -667,7 +667,7 @@ void hsetCommand(client *c) {
     }
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_HASH,"hset",c->argv[1],c->db->id);
-    swapOut(c->argv[1], c->db->id);
+    swapOut(c->argv[1], o, c->db->id);
     server.dirty += (c->argc - 2)/2;
 }
 
@@ -703,7 +703,7 @@ void hincrbyCommand(client *c) {
     addReplyLongLong(c,value);
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_HASH,"hincrby",c->argv[1],c->db->id);
-    swapOut(c->argv[1], c->db->id);
+    swapOut(c->argv[1], o, c->db->id);
     server.dirty++;
 }
 
@@ -747,7 +747,7 @@ void hincrbyfloatCommand(client *c) {
     addReplyBulkCBuffer(c,buf,len);
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_HASH,"hincrbyfloat",c->argv[1],c->db->id);
-    swapOut(c->argv[1], c->db->id);   
+    swapOut(c->argv[1], o, c->db->id);   
     server.dirty++;
 
     /* Always replicate HINCRBYFLOAT as an HSET command with the final value
@@ -844,7 +844,7 @@ void hdelCommand(client *c) {
                                 c->db->id);
             swapDel(c->argv[1], c->db->id);
         } else {
-            swapOut(c->argv[1], c->db->id);
+            swapOut(c->argv[1], o, c->db->id);
         }
         server.dirty += deleted;
     }

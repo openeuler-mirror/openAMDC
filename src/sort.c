@@ -557,7 +557,7 @@ void sortCommand(client *c) {
             setKey(c,c->db,storekey,sobj);
             notifyKeyspaceEvent(NOTIFY_LIST,"sortstore",storekey,
                                 c->db->id);
-            swapOut(storekey, c->db->id);
+            swapOut(storekey, sobj, c->db->id);
             server.dirty += outputlen;
         } else if (dbDelete(c->db,storekey)) {
             signalModifiedKey(c,c->db,storekey);

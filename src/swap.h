@@ -21,6 +21,8 @@
 #define SWAP_OUT 1
 #define SWAP_DEL 2
 
+#define SWAP_MAXMEMORY_FLAG_LFU 1
+
 typedef struct rocks {
   rocksdb_t *db;
   rocksdb_options_t *db_opts;
@@ -53,20 +55,38 @@ typedef struct swapDataEntry {
     uint64_t version;
 } swapDataEntry;
 
-swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, long long expiretime, uint64_t version);
-void swapDataEntryRelease(swapDataEntry *e);
+swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, robj *val, long long expiretime, uint64_t version);
+void swapDataEntryRelease(swapDataEntry *entry);
 
-struct swapState {
+#define SWAP_DATA_ENTRY_BATCH_BUFFER_SIZE 16
+
+typedef struct swapDataEntryBatch {
+    struct swapDataEntry *entry_buf[SWAP_DATA_ENTRY_BATCH_BUFFER_SIZE];
+    struct swapDataEntry **entries;
+    int capacity;
+    int count;
+} swapDataEntryBatch;
+
+swapDataEntryBatch *swapDataEntryBatchCreate(void);
+void swapDataEntryBatchRelease(swapDataEntryBatch *eb);
+void swapDataEntryBatchAdd(swapDataEntryBatch *eb, swapDataEntry *entry);
+int swapDataEntryBatchSubmit(swapDataEntryBatch *eb, int idx);
+int swapDataEntryBatchProcess(swapDataEntryBatch *eb);
+
+typedef struct swapState {
     rocks *rocks; /* RocksDB data */
-    cuckooFilter *cf;
-    list *pending_reqs[MAX_THREAD_VAR];
+    cuckooFilter cf;
+    swapDataEntryBatch *batch[MAX_THREAD_VAR];
+    list *pending_entries[MAX_THREAD_VAR];
     uint64_t swap_data_version;
-};
+    int maxmemory_policy;
+} swapState;
 
 void swapInit(void);
 void swapRelease(void);
-robj* swapIn(robj *key, int dbid);
-void swapOut(robj* key, int dbid);
+robj *swapIn(robj* key, int dbid);
+void swapOut(robj* key, robj *val, int dbid);
 void swapDel(robj* key, int dbid);
+void swapProcessPendingEntries(int iel);
 
 #endif

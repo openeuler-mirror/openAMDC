@@ -5228,7 +5228,7 @@ void restoreCommand(client *c) {
     objectSetLRUOrLFU(obj,lfu_freq,lru_idle,lru_clock,1000);
     signalModifiedKey(c,c->db,key);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"restore",key,c->db->id);
-    swapOut(key, c->db->id);    
+    swapOut(key, obj, c->db->id);    
     addReply(c,shared.ok);
     server.dirty++;
 }

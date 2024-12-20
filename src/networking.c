@@ -13,6 +13,7 @@
 #include "server.h"
 #include "atomicvar.h"
 #include "cluster.h"
+#include "swap.h"
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <math.h>
@@ -2415,6 +2416,11 @@ void commandProcessed(client *c, int callFlags) {
                     c->pending_querybuf, applied);
             sdsrange(c->pending_querybuf,applied,-1);
         }
+    }
+
+    /* Process any pending swap entries if swap is enabled. */
+    if (server.swap_enabled) {
+        swapProcessPendingEntries(threadId);
     }
 }
 

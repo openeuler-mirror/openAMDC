@@ -241,7 +241,7 @@ void pushGenericCommand(client *c, int where, int xx) {
     char *event = (where == LIST_HEAD) ? "lpush" : "rpush";
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_LIST,event,c->argv[1],c->db->id);
-    swapOut(c->argv[1], c->db->id);
+    swapOut(c->argv[1], lobj, c->db->id);
 }
 
 /* LPUSH <key> <element> [<element> ...] */
@@ -304,7 +304,7 @@ void linsertCommand(client *c) {
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_LIST,"linsert",
                             c->argv[1],c->db->id);
-        swapOut(c->argv[1], c->db->id);
+        swapOut(c->argv[1], subject, c->db->id);
         server.dirty++;
     } else {
         /* Notify client of a failed insert */
@@ -372,7 +372,7 @@ void lsetCommand(client *c) {
             addReply(c,shared.ok);
             signalModifiedKey(c,c->db,c->argv[1]);
             notifyKeyspaceEvent(NOTIFY_LIST,"lset",c->argv[1],c->db->id);
-            swapOut(c->argv[1], c->db->id); 
+            swapOut(c->argv[1], o, c->db->id); 
             server.dirty++;
         }
     } else {
@@ -435,7 +435,7 @@ void listElementsRemoved(client *c, robj *key, int where, robj *o, long count) {
         dbDelete(c->db, key);
         swapDel(c->argv[1], c->db->id);
     } else if (count) {
-        swapOut(c->argv[1], c->db->id);
+        swapOut(c->argv[1], o, c->db->id);
     }
     signalModifiedKey(c, c->db, key);
     server.dirty += count;
@@ -561,7 +561,7 @@ void ltrimCommand(client *c) {
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
         swapDel(c->argv[1], c->db->id);
     } else if (deleted) {
-        swapOut(c->argv[1], c->db->id);
+        swapOut(c->argv[1], o, c->db->id);
     }
     signalModifiedKey(c,c->db,c->argv[1]);
     server.dirty += (ltrim + rtrim);
@@ -749,7 +749,7 @@ void lmoveHandlePush(client *c, robj *dstkey, robj *dstobj, robj *value,
                         where == LIST_HEAD ? "lpush" : "rpush",
                         dstkey,
                         c->db->id);
-    swapOut(dstkey, c->db->id);
+    swapOut(dstkey, dstobj, c->db->id);
     /* Always send the pushed value to the client. */
     addReplyBulk(c,value);
 }

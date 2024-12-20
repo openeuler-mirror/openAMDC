@@ -472,7 +472,7 @@ int checkAlreadyExpired(long long when) {
  * unit is either UNIT_SECONDS or UNIT_MILLISECONDS, and is only used for
  * the argv[2] parameter. The basetime is always specified in milliseconds. */
 void expireGenericCommand(client *c, long long basetime, int unit) {
-    robj *key = c->argv[1], *param = c->argv[2];
+    robj *o, *key = c->argv[1], *param = c->argv[2];
     long long when; /* unix time in milliseconds when the key will expire. */
 
     if (getLongLongFromObjectOrReply(c, param, &when, NULL) != C_OK)
@@ -495,7 +495,7 @@ void expireGenericCommand(client *c, long long basetime, int unit) {
     when += basetime;
 
     /* No key, return zero. */
-    if (lookupKeyWrite(c->db,key) == NULL) {
+    if ((o = lookupKeyWrite(c->db,key)) == NULL) {
         addReply(c,shared.czero);
         return;
     }
@@ -521,7 +521,7 @@ void expireGenericCommand(client *c, long long basetime, int unit) {
         addReply(c,shared.cone);
         signalModifiedKey(c,c->db,key);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"expire",key,c->db->id);
-        swapOut(key, c->db->id);    
+        swapOut(key, o, c->db->id);    
         server.dirty++;
         return;
     }
@@ -583,11 +583,12 @@ void pttlCommand(client *c) {
 
 /* PERSIST key */
 void persistCommand(client *c) {
-    if (lookupKeyWrite(c->db,c->argv[1])) {
+    robj *o;
+    if ((o = lookupKeyWrite(c->db,c->argv[1])) != NULL) {
         if (removeExpire(c->db,c->argv[1])) {
             signalModifiedKey(c,c->db,c->argv[1]);
             notifyKeyspaceEvent(NOTIFY_GENERIC,"persist",c->argv[1],c->db->id);
-            swapOut(c->argv[1], c->db->id);  
+            swapOut(c->argv[1], o, c->db->id);  
             addReply(c,shared.cone);
             server.dirty++;
         } else {
