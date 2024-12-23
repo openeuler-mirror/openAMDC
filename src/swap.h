@@ -75,7 +75,7 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb);
 
 typedef struct swapState {
     rocks *rocks; /* RocksDB data */
-    cuckooFilter cf;
+    cuckooFilter coldFilter;
     swapDataEntryBatch *batch[MAX_THREAD_VAR];
     list *pending_entries[MAX_THREAD_VAR];
     uint64_t swap_data_version;

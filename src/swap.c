@@ -384,6 +384,7 @@ int swapDataEntryBatchSubmit(swapDataEntryBatch *eb, int idx) {
         /* Return the status of the batch processing. */
         return status;
     } else {
+        UNUSED(idx);
         // TODO: Implement asynchronous swap processing
     }
 
@@ -441,8 +442,10 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
         serverLog(LL_WARNING, "Rocksdb write batch failed, err:%s", err);
         zlibc_free(err);
         status = C_ERR;
+        goto cleanup;
     }
 
+    /* Check if there are no swap flush threads running. */
     if (server.swap_flush_threads_num == 0) {
         /* Iterate over each entry in the dictionary. */
         iter = dictGetIterator(filter);
@@ -451,7 +454,15 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
             /* Check if the entry's intention is SWAP_OUT. */
             if (entry->intention == SWAP_OUT) {
                 /* Move the key out of memory according to the swap-out policy. */
-                swapMoveKeyOutOfMemory(entry);
+                serverAssert(swapMoveKeyOutOfMemory(entry));
+                /* Insert the key into the cold filter. */
+                if (cuckooFilterInsert(&server.swap->coldFilter,
+                                       entry->key->ptr, 
+                                       sdslen(entry->key->ptr)) != CUCKOO_FILTER_INSERTED) {
+                    serverLog(LL_WARNING, "Cuckoo filter insert failed, key:%s", (sds)entry->key->ptr);
+                    status = C_ERR;
+                    goto cleanup;
+                }
             }
         }
     }
@@ -477,7 +488,7 @@ void swapInit(void) {
     }
 
     /* Initialize the Cuckoo Filter and log a warning if initialization fails. */
-    if (cuckooFilterInit(&server.swap->cf, 
+    if (cuckooFilterInit(&server.swap->coldFilter, 
                          server.swap_cuckoofilter_size_for_level /
                          server.swap_cuckoofilter_bucket_size /
                          sizeof(CuckooFingerprint),
@@ -509,7 +520,7 @@ void swapRelease(void) {
             listRelease(server.swap->pending_entries[iel]);
         }
     }
-    cuckooFilterFree(&server.swap->cf);
+    cuckooFilterFree(&server.swap->coldFilter);
     rocksClose();
 }
 

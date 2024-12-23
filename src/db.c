@@ -61,6 +61,28 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
         }
         return val;
     } else {
+        /* If swap is enabled and the key is not found in cold filter. */
+        if (server.swap_enabled &&
+            cuckooFilterContains(&server.swap->coldFilter, key->ptr, sdslen(key->ptr))) {
+            /* Attempt to swap the key back into memory. */
+            robj *val = swapIn(key, db->id);
+            /* If the swap-in operation fails, return NULL. */
+            if (val == NULL)
+                return NULL;
+
+            /* Remove the key from the cold filter. */
+            cuckooFilterDelete(&server.swap->coldFilter, key->ptr, sdslen(key->ptr));
+
+            /* Update the access time for the ageing algorithm.
+             * Don't do it if we have a saving child, as this will trigger
+             * a copy on write madness. */
+            if (!hasActiveChildProcess() && !(flags & LOOKUP_NOTOUCH)){
+                serverAssert(server.swap->maxmemory_policy == SWAP_MAXMEMORY_FLAG_LFU);
+                updateLFU(val);
+            }
+            return val;
+        }
+        /* Key not found, return NULL. */
         return NULL;
     }
 }
