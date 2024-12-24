@@ -3248,6 +3248,7 @@ void resetServerStats(void) {
     server.stat_swap_in_expired_keys_skipped = 0;
     server.stat_swap_in_keys_total = 0;
     server.stat_swap_out_keys_total = 0;
+    server.stat_swap_del_keys_total = 0;
 }
 
 /* Make the thread killable at any time, so that kill threads functions
@@ -5610,12 +5611,14 @@ sds genRedisInfoString(const char *section) {
         "stat_swap_in_keys_total:%lld\r\n"
         "stat_swap_in_empty_keys_skipped:%lld\r\n"
         "stat_swap_in_expired_keys_skipped:%lld\r\n"
-        "stat_swap_out_keys_total:%lld\r\n",
+        "stat_swap_out_keys_total:%lld\r\n"
+        "stat_swap_del_keys_total:%lld\r\n",
         server.swap_enabled,
         server.stat_swap_in_keys_total,
         server.stat_swap_in_empty_keys_skipped,
         server.stat_swap_in_expired_keys_skipped,
-        server.stat_swap_out_keys_total);
+        server.stat_swap_out_keys_total,
+        server.stat_swap_del_keys_total);
     }
     return info;
 }

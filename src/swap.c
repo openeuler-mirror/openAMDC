@@ -399,17 +399,21 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
     sds buf;
     int status = C_OK;
     char *err = NULL;
+    mstime_t swap_latency;
     dictEntry *de;
     dict *filter = dictCreate(&swapBatchFilterType, NULL);
     rocksdb_writebatch_t *wb = rocksdb_writebatch_create();
 
-    /* Iterate over the entries in reverse order to add them to the filter dictionary. */
+    /* Filter the data and keep the data of the latest version. */
     for (int i = eb->count-1; i >=0; i--) {
         swapDataEntry *entry = eb->entries[i];
         if ((de = dictFind(filter, entry->key->ptr)) == NULL) {
             dictAdd(filter, entry->key->ptr, entry);
         }
     }
+
+    /* Start monitoring the latency for the swap-batch operation. */
+    latencyStartMonitor(swap_latency);
 
     /* Process each entry in the filter dictionary. */
     dictIterator *iter = dictGetIterator(filter);
@@ -427,10 +431,14 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
             rocksdb_writebatch_put(wb, entry->key->ptr, sdslen(entry->key->ptr), buf, sdslen(buf));
             /* Free the encoded buffer. */
             sdsfree(buf);
+            /* Increment the total count of swap out keys in the swap statistics. */
+            server.stat_swap_out_keys_total++;
         /* Handle entries with intention to delete. */
         } else if (entry->intention == SWAP_DEL) {
             /* Delete the key from RocksDB using the write batch. */
             rocksdb_writebatch_delete(wb, entry->key->ptr, sdslen(entry->key->ptr));
+            /* Increment the total count of deleted keys in the swap statistics. */
+            server.stat_swap_del_keys_total++;
         } else {
             serverPanic("Invilid swap intention type: %d\n", entry->intention);
         }
@@ -445,6 +453,9 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
         goto cleanup;
     }
 
+    latencyEndMonitor(swap_latency);
+    latencyAddSampleIfNeeded("swap-batch", swap_latency);
+
     /* Check if there are no swap flush threads running. */
     if (server.swap_flush_threads_num == 0) {
         /* Iterate over each entry in the dictionary. */
@@ -453,8 +464,6 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
             swapDataEntry *entry = dictGetVal(de);
             /* Check if the entry's intention is SWAP_OUT. */
             if (entry->intention == SWAP_OUT) {
-                /* Move the key out of memory according to the swap-out policy. */
-                serverAssert(swapMoveKeyOutOfMemory(entry));
                 /* Insert the key into the cold filter. */
                 if (cuckooFilterInsert(&server.swap->coldFilter,
                                        entry->key->ptr, 
@@ -463,6 +472,8 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
                     status = C_ERR;
                     goto cleanup;
                 }
+                /* Move the key out of memory according to the swap-out policy. */
+                serverAssert(swapMoveKeyOutOfMemory(entry));
             }
         }
     }
@@ -475,11 +486,125 @@ cleanup:
     return status;
 }
 
+/* Creates and initializes a pool of swap entries. */
+swapPoolEntry *swapPoolEntryCreate(void) {
+    int j;
+    swapPoolEntry *ep = zmalloc(sizeof(*ep) * SWAP_POOL_SIZE);
+    for (j = 0; j < SWAP_POOL_SIZE; j++) {
+        ep[j].cost = 0;
+        ep[j].key = NULL;
+        ep[j].cached = sdsnewlen(NULL, SWAP_POOL_CACHED_SDS_SIZE);
+        ep[j].dbid = 0;
+    }
+    return ep;
+}
+
+/* Releases a pool of swap entries. */
+void swapPoolEntryRelease(swapPoolEntry *pool) {
+    for (int i = 0; i < SWAP_POOL_SIZE; i++) {
+        sdsfree(pool[i].cached);
+    }
+    zfree(pool);
+}
+
+/* Populate the swap pool with entries from the sample dictionary. */
+void swapPoolPopulate(swapPoolEntry *pool, int dbid, dict *sampledict, dict *keydict) {
+    /* Check if the server has swap functionality enabled,
+     * return immediately if not */
+    if (!server.swap_enabled) return;
+    
+    int j, k, count;
+    dictEntry *samples[server.swap_maxmemory_samples];
+
+    /* Retrieve a set of random keys from the sample dictionary. */
+    count = dictGetSomeKeys(sampledict,samples,server.swap_maxmemory_samples);
+    for (j = 0; j < count; j++) {
+        unsigned long long idle, cost;
+        sds key;
+        robj *o;
+        dictEntry *de;
+
+        de = samples[j];
+        key = dictGetKey(de);
+
+        /* If the dictionary we are sampling from is not the main
+         * dictionary (but the expires one) we need to lookup the key
+         * again in the key dictionary to obtain the value object. */
+        if (sampledict != keydict) de = dictFind(keydict, key);
+        o = dictGetVal(de);
+
+        /* Calculate the swap cost according to the policy. */
+        if (server.swap->maxmemory_policy == SWAP_MAXMEMORY_FLAG_LFU) {
+            /* When we use an LRU policy, we sort the keys by swap cost
+             * so that we expire keys starting from greater swap cost. */
+            idle = 255-LFUDecrAndReturn(o);
+            /* Calculate the cost based on idle time and the computed size
+             * of the object. */
+            cost = idle*objectComputeSize(o, OBJ_COMPUTE_SIZE_DEF_SAMPLES);
+        } else {
+            serverPanic("Unknown swap policy in swapPoolPopulate()");
+        }
+
+        /* Insert the element inside the pool.
+         * First, find the first empty bucket or the first populated
+         * bucket that has an swap cost smaller than our swap cost. */
+        k = 0;
+        while (k < SWAP_POOL_SIZE &&
+               pool[k].key &&
+               pool[k].cost < cost) k++;
+        if (k == 0 && pool[SWAP_POOL_SIZE-1].key != NULL) {
+            /* Can't insert if the element is < the worst element we have
+             * and there are no empty buckets. */
+            continue;
+        } else if (k < SWAP_POOL_SIZE && pool[k].key == NULL) {
+            /* Inserting into empty position. No setup needed before insert. */
+        } else {
+            /* Inserting in the middle. Now k points to the first element
+             * greater than the element to insert.  */
+            if (pool[SWAP_POOL_SIZE-1].key == NULL) {
+                /* Free space on the right? Insert at k shifting
+                 * all the elements from k to end to the right. */
+
+                /* Save SDS before overwriting. */
+                sds cached = pool[SWAP_POOL_SIZE-1].cached;
+                memmove(pool+k+1,pool+k,
+                    sizeof(pool[0])*(SWAP_POOL_SIZE-k-1));
+                pool[k].cached = cached;
+            } else {
+                /* No free space on right? Insert at k-1 */
+                k--;
+                /* Shift all elements on the left of k (included) to the
+                 * left, so we discard the element with smaller swap cost. */
+                sds cached = pool[0].cached; /* Save SDS before overwriting. */
+                if (pool[0].key != pool[0].cached) sdsfree(pool[0].key);
+                memmove(pool,pool+1,sizeof(pool[0])*k);
+                pool[k].cached = cached;
+            }
+        }
+
+        /* Try to reuse the cached SDS string allocated in the pool entry,
+         * because allocating and deallocating this object is costly
+         * (according to the profiler, not my fantasy. Remember:
+         * premature optimization bla bla bla. */
+        int klen = sdslen(key);
+        if (klen > SWAP_POOL_CACHED_SDS_SIZE) {
+            pool[k].key = sdsdup(key);
+        } else {
+            memcpy(pool[k].cached,key,klen+1);
+            sdssetlen(pool[k].cached,klen);
+            pool[k].key = pool[k].cached;
+        }
+        pool[k].cost = cost;
+        pool[k].dbid = dbid;
+    }
+}
+
 /* Initializes the swap state. */
 void swapInit(void) {
     server.swap = zmalloc(sizeof(swapState));    
     server.swap->swap_data_version = 0;
     server.swap->maxmemory_policy = SWAP_MAXMEMORY_FLAG_LFU;
+    server.swap->pool = swapPoolEntryCreate();
 
     /* Initialize RocksDB and log a warning if initialization fails. */
     if (rocksInit() == C_ERR) {
@@ -514,14 +639,30 @@ void swapRelease(void) {
     for (int iel = 0; iel < MAX_THREAD_VAR; ++iel) {
         if (iel < server.worker_threads_num || 
             (iel == MODULE_THREAD_ID && server.worker_threads_num > 1)) {
-            if (server.swap->batch[iel]) {
-                swapDataEntryBatchSubmit(server.swap->batch[iel], -1);
-            }
+            swapFlushThread(iel);
             listRelease(server.swap->pending_entries[iel]);
         }
     }
+    swapPoolEntryRelease(server.swap->pool);
     cuckooFilterFree(&server.swap->coldFilter);
     rocksClose();
+}
+
+/* Flushes the swap batch at iel worker thread. */
+int swapFlushThread(int iel) {
+    /* Check if the server has swap functionality enabled,
+     * return immediately if not */
+    if (!server.swap_enabled) return C_OK;
+    
+    if (server.swap->batch[iel]) {
+        /* Submit the current batch for processing. */
+        if (swapDataEntryBatchSubmit(server.swap->batch[iel], -1) == C_ERR) {
+            return C_ERR;
+        }
+        /* Create a new batch for future entries. */
+        server.swap->batch[iel] = swapDataEntryBatchCreate();
+    }
+    return C_OK;
 }
 
 /* Retrieving an object from the swap database (RocksDB) and adding it back
@@ -659,9 +800,6 @@ void swapProcessPendingEntries(int iel) {
         listDelNode(entries, ln);
 
         /* Submit the swap data entry to the swap system. */
-        if (swapDataEntrySubmit(e, -1) == C_ERR) {
-            /* If submission fails, free the swap data entry. */
-            serverLog(LL_WARNING, "Failed to submit swap data entry");
-        }
+        swapDataEntrySubmit(e, -1);
     }
 }

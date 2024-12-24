@@ -2800,6 +2800,7 @@ standardConfig configs[] = {
     createIntConfig("min-replicas-max-lag", "min-slaves-max-lag", MODIFIABLE_CONFIG, 0, INT_MAX, server.repl_min_slaves_max_lag, 10, INTEGER_CONFIG, NULL, updateGoodSlaves),
     createIntConfig("swap-flush-threads-num", NULL, IMMUTABLE_CONFIG, 0, 64, server.swap_flush_threads_num, 0, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("swap-data-entry-batch-size", NULL, IMMUTABLE_CONFIG, 1, 64, server.swap_data_entry_batch_size, 4, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("swap-maxmemory-samples", NULL, MODIFIABLE_CONFIG, 1, INT_MAX, server.swap_maxmemory_samples, 5, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("swap-cuckoofilter-bucket-size", NULL, IMMUTABLE_CONFIG, 1, 64, server.swap_cuckoofilter_bucket_size, 4, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("rocksdb-max-background-jobs", NULL, IMMUTABLE_CONFIG, 1, 64, server.rocksdb_max_background_jobs, 2, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("rocksdb-max-background-compactions", NULL, IMMUTABLE_CONFIG, 1, 64, server.rocksdb_max_background_compactions, 2, INTEGER_CONFIG, NULL, NULL),

@@ -87,6 +87,7 @@ typedef long long ustime_t; /* microsecond time type. */
 #define CRON_DBS_PER_CALL 16
 #define NET_MAX_WRITES_PER_EVENT (1024*64)
 #define PROTO_SHARED_SELECT_CMDS 10
+#define OBJ_COMPUTE_SIZE_DEF_SAMPLES 5        /* Default sample size. */
 #define OBJ_SHARED_INTEGERS 10000
 #define OBJ_SHARED_BULKHDR_LEN 32
 #define OBJ_SHARED_HDR_STRLEN(_len_) (((_len_) < 10) ? 4 : 5) /* see shared.mbulkhdr etc. */
@@ -1325,6 +1326,7 @@ struct redisServer {
     long long stat_swap_in_empty_keys_skipped; /* Number of swap keys skipped due to being empty */
     long long stat_swap_in_expired_keys_skipped; /* Number of swap keys skipped due to being expired */
     long long stat_swap_out_keys_total; /* Total number of keys swapped out */
+    long long stat_swap_del_keys_total; /* Total number of keys deleted */ 
     /* The following two are used to track instantaneous metrics, like
      * number of operations per second, network traffic. */
     struct {
@@ -1658,6 +1660,7 @@ struct redisServer {
     struct swapState *swap; /* State of the swap */
     int swap_flush_threads_num; /* Number of threads used to flush data to swap */
     int swap_data_entry_batch_size; /* Batch of data entries to be written to swap */
+    int swap_maxmemory_samples; /* Precision of random sampling */
     unsigned long long swap_cuckoofilter_size_for_level; /* Size of the cuckoo filter in bytes */
     int swap_cuckoofilter_bucket_size; /* Size of cuckoo filter bucket */
     int rocksdb_max_background_jobs; /* Set the maximum number of concurrent background operations such as compaction and mergin */
@@ -2092,6 +2095,7 @@ int compareStringObjects(robj *a, robj *b);
 int collateStringObjects(robj *a, robj *b);
 int equalStringObjects(robj *a, robj *b);
 unsigned long long estimateObjectIdleTime(robj *o);
+size_t objectComputeSize(robj *o, size_t sample_size);
 void trimStringObjectIfNeeded(robj *o);
 #define sdsEncodedObject(objptr) (objptr->encoding == OBJ_ENCODING_RAW || objptr->encoding == OBJ_ENCODING_EMBSTR)
 

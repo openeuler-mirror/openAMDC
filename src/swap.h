@@ -73,11 +73,26 @@ void swapDataEntryBatchAdd(swapDataEntryBatch *eb, swapDataEntry *entry);
 int swapDataEntryBatchSubmit(swapDataEntryBatch *eb, int idx);
 int swapDataEntryBatchProcess(swapDataEntryBatch *eb);
 
+#define SWAP_POOL_SIZE 16
+#define SWAP_POOL_CACHED_SDS_SIZE 255
+
+typedef struct swapPoolEntry {
+    unsigned long long cost;    /* Object swap cost. */
+    sds key;                    /* Key name. */
+    sds cached;                 /* Cached SDS object for key name. */
+    int dbid;                   /* Key DB number. */
+} swapPoolEntry;
+
+swapPoolEntry *swapPoolEntryCreate(void);
+void swapPoolEntryRelease(swapPoolEntry *pool);
+void swapPoolPopulate(swapPoolEntry *pool, int dbid, dict *sampledict, dict *keydict);
+
 typedef struct swapState {
     rocks *rocks; /* RocksDB data */
     cuckooFilter coldFilter;
     swapDataEntryBatch *batch[MAX_THREAD_VAR];
     list *pending_entries[MAX_THREAD_VAR];
+    swapPoolEntry *pool;
     uint64_t swap_data_version;
     int maxmemory_policy;
 } swapState;
@@ -87,6 +102,7 @@ void swapRelease(void);
 robj *swapIn(robj* key, int dbid);
 void swapOut(robj* key, robj *val, int dbid);
 void swapDel(robj* key, int dbid);
+int swapFlushThread(int iel);
 void swapProcessPendingEntries(int iel);
 
 #endif
