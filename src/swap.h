@@ -21,7 +21,11 @@
 #define SWAP_OUT 1
 #define SWAP_DEL 2
 
-#define SWAP_MAXMEMORY_FLAG_LFU 1
+#define SWAP_OK 0
+#define SWAP_RUNNING 1
+#define SWAP_FAIL 2
+
+#define SWAP_HOTMEMORY_FLAG_LFU 1
 
 typedef struct rocks {
   rocksdb_t *db;
@@ -94,7 +98,7 @@ typedef struct swapState {
     list *pending_entries[MAX_THREAD_VAR];
     swapPoolEntry *pool;
     uint64_t swap_data_version;
-    int maxmemory_policy;
+    int hotmemory_policy;
 } swapState;
 
 void swapInit(void);
@@ -103,6 +107,8 @@ robj *swapIn(robj* key, int dbid);
 void swapOut(robj* key, robj *val, int dbid);
 void swapDel(robj* key, int dbid);
 int swapFlushThread(int iel);
+int performSwapData(void);
+int overSwapHotmemoryAfterAlloc(size_t moremem);
 void swapProcessPendingEntries(int iel);
 
 #endif

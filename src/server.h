@@ -1660,7 +1660,9 @@ struct redisServer {
     struct swapState *swap; /* State of the swap */
     int swap_flush_threads_num; /* Number of threads used to flush data to swap */
     int swap_data_entry_batch_size; /* Batch of data entries to be written to swap */
-    int swap_maxmemory_samples; /* Precision of random sampling */
+    unsigned long long swap_hotmemory; /* Max number of hot memory bytes to use */
+    int swap_hotmemory_samples; /* Precision of random sampling */
+    int swap_hotmemory_eviction_tenacity; /* Aggressiveness of swap processing */
     unsigned long long swap_cuckoofilter_size_for_level; /* Size of the cuckoo filter in bytes */
     int swap_cuckoofilter_bucket_size; /* Size of cuckoo filter bucket */
     int rocksdb_max_background_jobs; /* Set the maximum number of concurrent background operations such as compaction and mergin */

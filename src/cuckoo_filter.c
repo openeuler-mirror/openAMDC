@@ -42,8 +42,9 @@ void cuckooFilterSetHashFunctionSeed(uint8_t *seed) {
     memcpy(cuckoo_hash_function_seed,seed,sizeof(cuckoo_hash_function_seed));
 }
 
-int cuckooFilterInit(cuckooFilter *filter, uint64_t capacity, uint16_t bucketSize,
+int cuckooFilterInit(cuckooFilter *filter, uint64_t levelSize, uint16_t bucketSize,
                       uint16_t maxIterations, uint16_t expansion) {
+    uint64_t capacity = levelSize / sizeof(CuckooFingerprint);
     memset(filter, 0, sizeof(*filter));
     filter->expansion = getNextN2(expansion);
     filter->bucketSize = bucketSize;
@@ -432,7 +433,7 @@ int cuckooFilterTest(int argc, char **argv, int accurate) {
     UNUSED(accurate);
     uint64_t capacity = 1000000;
     cuckooFilter ck;
-    cuckooFilterInit(&ck, capacity, CF_DEFAULT_BUCKETSIZE, 500, 1);
+    cuckooFilterInit(&ck, capacity * sizeof(CuckooFingerprint), CF_DEFAULT_BUCKETSIZE, 500, 1);
     assert(ck.numItems == 0);
     assert(ck.numFilters == 1);
 

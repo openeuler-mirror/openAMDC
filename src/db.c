@@ -77,7 +77,7 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
              * Don't do it if we have a saving child, as this will trigger
              * a copy on write madness. */
             if (!hasActiveChildProcess() && !(flags & LOOKUP_NOTOUCH)){
-                serverAssert(server.swap->maxmemory_policy == SWAP_MAXMEMORY_FLAG_LFU);
+                serverAssert(server.swap->hotmemory_policy == SWAP_HOTMEMORY_FLAG_LFU);
                 updateLFU(val);
             }
             return val;

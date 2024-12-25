@@ -12,12 +12,10 @@
 
 #include "server.h"
 #include "swap.h"
+#include <math.h>
 
 #define KB 1024
 #define MB (1024 * 1024)
-
-#define SWAP_OK 0
-#define SWAP_FAIL 1
 
 #define ROCKSDB_DIR "rocksdb.data"
 
@@ -237,7 +235,7 @@ static sds swapDataEncodeObject(swapDataEntry *entry) {
     int rdb_compression = server.rdb_compression;
     server.rdb_compression = 0;
 
-    serverAssert(server.swap->maxmemory_policy == SWAP_MAXMEMORY_FLAG_LFU);
+    serverAssert(server.swap->hotmemory_policy == SWAP_HOTMEMORY_FLAG_LFU);
 
     /* Init RIO */
     rioInitWithBuffer(&payload, sdsempty());
@@ -514,10 +512,10 @@ void swapPoolPopulate(swapPoolEntry *pool, int dbid, dict *sampledict, dict *key
     if (!server.swap_enabled) return;
     
     int j, k, count;
-    dictEntry *samples[server.swap_maxmemory_samples];
+    dictEntry *samples[server.swap_hotmemory_samples];
 
     /* Retrieve a set of random keys from the sample dictionary. */
-    count = dictGetSomeKeys(sampledict,samples,server.swap_maxmemory_samples);
+    count = dictGetSomeKeys(sampledict,samples,server.swap_hotmemory_samples);
     for (j = 0; j < count; j++) {
         unsigned long long idle, cost;
         sds key;
@@ -534,7 +532,7 @@ void swapPoolPopulate(swapPoolEntry *pool, int dbid, dict *sampledict, dict *key
         o = dictGetVal(de);
 
         /* Calculate the swap cost according to the policy. */
-        if (server.swap->maxmemory_policy == SWAP_MAXMEMORY_FLAG_LFU) {
+        if (server.swap->hotmemory_policy == SWAP_HOTMEMORY_FLAG_LFU) {
             /* When we use an LRU policy, we sort the keys by swap cost
              * so that we expire keys starting from greater swap cost. */
             idle = 255-LFUDecrAndReturn(o);
@@ -603,7 +601,7 @@ void swapPoolPopulate(swapPoolEntry *pool, int dbid, dict *sampledict, dict *key
 void swapInit(void) {
     server.swap = zmalloc(sizeof(swapState));    
     server.swap->swap_data_version = 0;
-    server.swap->maxmemory_policy = SWAP_MAXMEMORY_FLAG_LFU;
+    server.swap->hotmemory_policy = SWAP_HOTMEMORY_FLAG_LFU;
     server.swap->pool = swapPoolEntryCreate();
 
     /* Initialize RocksDB and log a warning if initialization fails. */
@@ -614,9 +612,7 @@ void swapInit(void) {
 
     /* Initialize the Cuckoo Filter and log a warning if initialization fails. */
     if (cuckooFilterInit(&server.swap->coldFilter, 
-                         server.swap_cuckoofilter_size_for_level /
-                         server.swap_cuckoofilter_bucket_size /
-                         sizeof(CuckooFingerprint),
+                         server.swap_cuckoofilter_size_for_level,
                          server.swap_cuckoofilter_bucket_size,
                          CF_DEFAULT_MAX_ITERATIONS,
                          CF_DEFAULT_EXPANSION) == -1) {
@@ -684,7 +680,8 @@ robj *swapIn(robj *key, int dbid) {
     val = rocksdb_get_cf(server.swap->rocks->db,
                          server.swap->rocks->ropts,
                          server.swap->rocks->cf_handles[dbid],
-                         key->ptr, sdslen(key->ptr),
+                         key->ptr,
+                         sdslen(key->ptr),
                          &vallen,
                          &err);
     if (err != NULL) {
@@ -732,7 +729,7 @@ robj *swapIn(robj *key, int dbid) {
             setExpire(NULL, server.db+dbid, key, expiretime);
         }
 
-        /* Set usage information (for eviction). */
+        /* Set usage information (for swap). */
         objectSetLRUOrLFU(o, lfu_freq, -1, LRU_CLOCK(), 1000);
     }
 
@@ -749,7 +746,7 @@ static void swapData(int intention, robj *key, robj *val, int dbid) {
      * return immediately if not */
     if (!server.swap_enabled) return;
     
-    if (!server.maxmemory) {
+    if (!server.swap_hotmemory) {
         /* If the intention of the swap operation is to swap
          * out, retrieve the expiration time of the key */
         long long expire = -1;
@@ -783,6 +780,325 @@ void swapDel(robj *key, int dbid) {
     /* Call swapData function with SWAP_DEL operation
      * to delete the key from swap. */
     swapData(SWAP_DEL, key, NULL, dbid);
+}
+
+/* Get the memory status from the point of view of the hotmemory directive:
+ * if the memory used is under the hotmemory setting then C_OK is returned.
+ * Otherwise, if we are over the memory limit, the function returns
+ * C_ERR.
+ *
+ * The function may return additional info via reference, only if the
+ * pointers to the respective arguments is not NULL. Certain fields are
+ * populated only when C_ERR is returned:
+ *
+ *  'total'     total amount of bytes used.
+ *              (Populated both for C_ERR and C_OK)
+ *
+ *  'logical'   the amount of memory used minus the slaves/AOF buffers.
+ *              (Populated when C_ERR is returned)
+ *
+ *  'tofree'    the amount of memory that should be released
+ *              in order to return back into the memory limits.
+ *              (Populated when C_ERR is returned)
+ *
+ *  'level'     this usually ranges from 0 to 1, and reports the amount of
+ *              memory currently used. May be > 1 if we are over the memory
+ *              limit.
+ *              (Populated both for C_ERR and C_OK)
+ */
+int getSwapHotmemoryState(size_t *total, size_t *logical, size_t *tofree, float *level) {
+    size_t mem_reported, mem_used, mem_tofree;
+
+    /* Check if we are over the hotmemory usage limit. If we are not, no need
+     * to subtract the slaves output buffers. We can just return ASAP. */
+    mem_reported = zmalloc_used_memory();
+    if (total) *total = mem_reported;
+
+    /* We may return ASAP if there is no need to compute the level. */
+    int return_ok_asap = !server.swap_hotmemory || mem_reported <= server.swap_hotmemory;
+    if (return_ok_asap && !level) return C_OK;
+
+    /* Remove the size of slaves output buffers and AOF buffer from the
+     * count of used hotmemory. */
+    mem_used = mem_reported;
+    size_t overhead = freeMemoryGetNotCountedMemory();
+    mem_used = (mem_used > overhead) ? mem_used-overhead : 0;
+
+    /* Compute the ratio of hotmemory usage. */
+    if (level) {
+        if (!server.swap_hotmemory) {
+            *level = 0;
+        } else {
+            *level = (float)mem_used / (float)server.swap_hotmemory;
+        }
+    }
+
+    if (return_ok_asap) return C_OK;
+
+    /* Check if we are still over the memory limit. */
+    if (mem_used <= server.swap_hotmemory) return C_OK;
+
+    /* Compute how much hotmemory we need to free. */
+    mem_tofree = mem_used - server.swap_hotmemory;
+
+    if (logical) *logical = mem_used;
+    if (tofree) *tofree = mem_tofree;
+
+    return C_ERR;
+}
+
+/* Return 1 if used memory is more than hotmemory after allocating more memory,
+ * return 0 if not. OpenAMDC may reject user's requests or evict some keys if used
+ * memory exceeds hotmemory, especially, when we allocate huge memory at once. */
+int overSwapHotmemoryAfterAlloc(size_t moremem) {
+    if (!server.swap_hotmemory) return  0; /* No limit. */
+
+    /* Check quickly. */
+    size_t mem_used = zmalloc_used_memory();
+    if (mem_used + moremem <= server.swap_hotmemory) return 0;
+
+    size_t overhead = freeMemoryGetNotCountedMemory();
+    mem_used = (mem_used > overhead) ? mem_used - overhead : 0;
+    return mem_used + moremem > server.swap_hotmemory;
+}
+
+/* The swapTimeProc is started when "hotmemory" has been breached and
+ * could not immediately be resolved. This will spin the event loop with short
+ * eviction cycles until the "hotmemory" condition has resolved or there are no
+ * more evictable items.  */
+static int isSwapProcRunning = 0;
+static int swapTimeProc(
+        struct aeEventLoop *eventLoop, long long id, void *clientData) {
+    UNUSED(eventLoop);
+    UNUSED(id);
+    UNUSED(clientData);
+    serverAssert(threadOwnLock());
+
+    if (performSwapData() == SWAP_RUNNING) return 0;  /* keep swapping */
+
+    /* For SWAP_OK - things are good, no need to keep swapping.
+     * For SWAP_FAIL - there is nothing left to swap.  */
+    isSwapProcRunning = 0;
+    return AE_NOMORE;
+}
+
+/* Check if it's safe to perform swap data.
+ *   Returns 1 if swap data can be performed.
+ *   Returns 0 if swap data processing should be skipped. */
+static int isSafeToPerformSwapData(void) {
+    /* - There must be no script in timeout condition.
+     * - Nor we are loading data right now.  */
+    if (server.lua_timedout || server.loading) return 0;
+
+    /* When clients are paused the dataset should be static not just from the
+     * POV of clients not being able to write, but also from the POV of
+     * swap of keys not being performed. */
+    if (checkClientPauseTimeoutAndReturnIfPaused()) return 0;
+
+    return 1;
+}
+
+/* Algorithm for converting tenacity (0-100) to a time limit.  */
+static unsigned long swapTimeLimitUs() {
+    serverAssert(server.swap_hotmemory_eviction_tenacity >= 0);
+    serverAssert(server.swap_hotmemory_eviction_tenacity <= 100);
+
+    if (server.swap_hotmemory_eviction_tenacity <= 10) {
+        /* A linear progression from 0..500us */
+        return 50uL * server.swap_hotmemory_eviction_tenacity;
+    }
+
+    if (server.swap_hotmemory_eviction_tenacity < 100) {
+        /* A 15% geometric progression, resulting in a limit of ~2 min at tenacity==99  */
+        return (unsigned long)(500.0 * pow(1.15, server.swap_hotmemory_eviction_tenacity - 10.0));
+    }
+
+    return ULONG_MAX;   /* No limit to swap time */
+}
+
+/* Check that memory usage is within the current "hotmemory" limit.  If over
+ * "hotmemory", attempt to free memory by swapping data (if it's safe to do so).
+ *
+ * It's possible for openAMDC to suddenly be significantly over the "hotmemory"
+ * setting.  This can happen if there is a large allocation (like a hash table
+ * resize) or even if the "hotmemory" setting is manually adjusted.  Because of
+ * this, it's important to swap for a managed period of time - otherwise openAMDC
+ * would become unresponsive while swapping.
+ *
+ * The goal of this function is to improve the memory situation - not to
+ * immediately resolve it.  In the case that some items have been evicted but
+ * the "hotmemory" limit has not been achieved, an aeTimeProc will be started
+ * which will continue to swap items until memory limits are achieved or
+ * nothing more is evictable.
+ *
+ * This should be called before execution of commands.  If SWAP_FAIL is
+ * returned, commands which will result in increased memory usage should be
+ * rejected.
+ *
+ * Returns:
+ *   SWAP_OK       - hotmemory is OK or it's not possible to perform swap data now
+ *   SWAP_RUNNING  - hotmemory is over the limit, but swap data is still processing
+ *   SWAP_FAIL     - hotmemory is over the limit, and there's nothing to swap
+ * */
+
+int performSwapData(void) {
+    serverAssert(threadOwnLock());
+    serverAssert(server.swap->hotmemory_policy == SWAP_HOTMEMORY_FLAG_LFU);
+    if (!isSafeToPerformSwapData()) return SWAP_OK;
+
+    long long keys_swapped = 0;
+    size_t mem_reported, mem_tofree;
+    long long mem_freed; /* May be negative */
+    mstime_t latency, swap_latency;
+    long long delta;
+    int slaves = listLength(server.slaves);
+    int result = SWAP_FAIL;
+
+    if (getSwapHotmemoryState(&mem_reported,NULL,&mem_tofree,NULL) == C_OK)
+        return SWAP_OK;
+
+    unsigned long swap_time_limit_us = swapTimeLimitUs();
+
+    mem_freed = 0;
+
+    latencyStartMonitor(latency);
+
+    monotime swapTimer;
+    elapsedStart(&swapTimer);
+
+    while (mem_freed < (long long)mem_tofree) {
+        int k, i;
+        sds bestkey = NULL;
+        int bestdbid;
+        redisDb *db;
+        dict *dict;
+        dictEntry *de;
+        uint64_t version;
+        long long expire = -1;
+        swapDataEntry *entry;
+        swapPoolEntry *pool = server.swap->pool;
+
+        while(bestkey == NULL) {
+            unsigned long total_keys = 0, keys;
+
+            /* We don't want to make local-db choices when expiring keys,
+             * so to start populate the swap pool sampling keys from
+             * every DB. */
+            for (i = 0; i < server.dbnum; i++) {
+                db = server.db+i;
+                dict = db->dict;
+                if ((keys = dictSize(dict)) != 0) {
+                    swapPoolPopulate(pool, i, dict, db->dict);
+                    total_keys += keys;
+                }
+            }
+            if (!total_keys) break; /* No keys to swap. */
+
+            /* Go backward from best to worst element to swap. */
+            for (k = SWAP_POOL_SIZE-1; k >= 0; k--) {
+                if (pool[k].key == NULL) continue;
+                bestdbid = pool[k].dbid;
+                de = dictFind(server.db[pool[k].dbid].dict,pool[k].key);
+
+                /* Remove the entry from the pool. */
+                if (pool[k].key != pool[k].cached)
+                    sdsfree(pool[k].key);
+                pool[k].key = NULL;
+                pool[k].cost = 0;
+
+                /* If the key exists, is our pick. Otherwise it is
+                 * a ghost and we need to try the next element. */
+                if (de) {
+                    bestkey = dictGetKey(de);
+                    break;
+                } else {
+                    /* Ghost... Iterate again. */
+                }
+            }
+        }
+
+        /* Finally swap the selected key. */
+        if (bestkey) {
+            db = server.db+bestdbid;
+            robj *keyobj, *valobj;
+            keyobj = createStringObject(bestkey,sdslen(bestkey));
+            /* We compute the amount of memory freed by swap alone.
+             * AOF and Output buffer memory will be freed eventually so
+             * we only care about memory used by the key space. */
+            delta = (long long) zmalloc_used_memory();
+            latencyStartMonitor(swap_latency);
+            version = server.swap->swap_data_version++;
+            expire = ((de = dictFind(db->expires,bestkey)) == NULL) ? -1 : dictGetSignedIntegerVal(de);
+            valobj = ((de = dictFind(db->dict,bestkey)) == NULL) ? NULL : dictGetVal(de);
+            entry = swapDataEntryCreate(SWAP_OUT, bestdbid, keyobj, valobj, expire, version);
+            swapDataEntrySubmit(entry, -1);
+            latencyEndMonitor(swap_latency);
+            latencyAddSampleIfNeeded("hotmemory-trigger-swap-out", swap_latency);
+            delta -= (long long) zmalloc_used_memory();
+            mem_freed += delta;
+            keys_swapped++;
+
+            if (keys_swapped % server.swap_data_entry_batch_size == 0) {
+                /* When the memory to free starts to be big enough, we may
+                 * start spending so much time here that is impossible to
+                 * deliver data to the replicas fast enough, so we force the
+                 * transmission here inside the loop. */
+                if (slaves) flushSlavesOutputBuffers();
+
+                /* Normally our stop condition is the ability to release
+                 * a fixed, pre-computed amount of memory. However when we
+                 * are deleting objects in another thread, it's better to
+                 * check, from time to time, if we already reached our target
+                 * memory, since the "mem_freed" amount is computed only
+                 * across the swapDataEntrySubmit() call, while the thread can
+                 * release the memory all the time. */
+                if (getSwapHotmemoryState(NULL,NULL,NULL,NULL) == C_OK) {
+                    break;
+                }
+
+                /* After some time, exit the loop early - even if memory limit
+                 * hasn't been reached.  If we suddenly need to free a lot of
+                 * memory, don't want to spend too much time here.  */
+                if (elapsedUs(swapTimer) > swap_time_limit_us) {
+                    /* We still need to free memory - start swap timer proc. */
+                    if (!isSwapProcRunning) {
+                        isSwapProcRunning = 1;
+                        aeCreateTimeEvent(server.el[threadId], 0,
+                                swapTimeProc, NULL, NULL);
+                    }
+                    break;
+                }
+            }
+        } else {
+            goto cant_free; /* nothing to swap... */
+        }
+    }
+    /* at this point, the memory is OK, or we have reached the time limit */
+    result = (isSwapProcRunning) ? SWAP_RUNNING : SWAP_OK;
+
+cant_free:
+    if (result == SWAP_FAIL) {
+        /* At this point, we have run out of swappable items. It's possible
+         * that some items are being freed in the lazyfree thread. Perform a
+         * short wait here if such jobs exist, but don't wait long.  */
+        mstime_t swap_latency;
+        latencyStartMonitor(swap_latency);
+        while (swapFlushThread(threadId) == C_OK &&
+              elapsedUs(swapTimer) < swap_time_limit_us) {
+            if (getSwapHotmemoryState(NULL,NULL,NULL,NULL) == C_OK) {
+                result = SWAP_OK;
+                break;
+            }
+            usleep(swap_time_limit_us < 1000 ? swap_time_limit_us : 1000);
+        }
+        latencyEndMonitor(swap_latency);
+        latencyAddSampleIfNeeded("swap-flush",swap_latency);
+    }
+
+    latencyEndMonitor(latency);
+    latencyAddSampleIfNeeded("swap-cycle",latency);
+    server.stat_swap_out_keys_total += keys_swapped;
+    return result;
 }
 
 /* Process pending swap data entries for a specific thread. */

@@ -11,6 +11,7 @@
  */
 
 #include "server.h"
+#include "swap.h"
 #include "bio.h"
 #include "atomicvar.h"
 #include <math.h>
@@ -325,6 +326,11 @@ size_t freeMemoryGetNotCountedMemory(void) {
     }
     if (server.aof_state != AOF_OFF) {
         overhead += sdsalloc(server.aof_buf)+aofRewriteBufferSize();
+    }
+    if (server.swap_enabled) {
+        cuckooFilterStat status;
+        cuckooFilterGetStat(&server.swap->coldFilter, &status);
+        overhead += status.used_memory;
     }
     return overhead;
 }

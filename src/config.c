@@ -2299,6 +2299,19 @@ static int updateMaxmemory(long long val, long long prev, const char **err) {
     return 1;
 }
 
+static int updateSwapHotmemory(long long val, long long prev, const char **err) {
+    UNUSED(prev);
+    UNUSED(err);
+    if (val) {
+        size_t used = zmalloc_used_memory()-freeMemoryGetNotCountedMemory();
+        if ((unsigned long long)val < used) {
+            serverLog(LL_WARNING,"WARNING: the new swap hotmemory value set via CONFIG SET (%llu) is smaller than the current memory usage (%zu). This will result in key eviction and/or the inability to accept new write commands depending on the maxmemory-policy.", server.maxmemory, used);
+        }
+        performSwapData();
+    }
+    return 1;
+}
+
 static int updateGoodSlaves(long long val, long long prev, const char **err) {
     UNUSED(val);
     UNUSED(prev);
@@ -2800,7 +2813,8 @@ standardConfig configs[] = {
     createIntConfig("min-replicas-max-lag", "min-slaves-max-lag", MODIFIABLE_CONFIG, 0, INT_MAX, server.repl_min_slaves_max_lag, 10, INTEGER_CONFIG, NULL, updateGoodSlaves),
     createIntConfig("swap-flush-threads-num", NULL, IMMUTABLE_CONFIG, 0, 64, server.swap_flush_threads_num, 0, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("swap-data-entry-batch-size", NULL, IMMUTABLE_CONFIG, 1, 64, server.swap_data_entry_batch_size, 4, INTEGER_CONFIG, NULL, NULL),
-    createIntConfig("swap-maxmemory-samples", NULL, MODIFIABLE_CONFIG, 1, INT_MAX, server.swap_maxmemory_samples, 5, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("swap-hotmemory-samples", NULL, MODIFIABLE_CONFIG, 1, INT_MAX, server.swap_hotmemory_samples, 5, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("swap-hotmemory-eviction-tenacity", NULL, MODIFIABLE_CONFIG, 0, 100, server.swap_hotmemory_eviction_tenacity, 10, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("swap-cuckoofilter-bucket-size", NULL, IMMUTABLE_CONFIG, 1, 64, server.swap_cuckoofilter_bucket_size, 4, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("rocksdb-max-background-jobs", NULL, IMMUTABLE_CONFIG, 1, 64, server.rocksdb_max_background_jobs, 2, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("rocksdb-max-background-compactions", NULL, IMMUTABLE_CONFIG, 1, 64, server.rocksdb_max_background_compactions, 2, INTEGER_CONFIG, NULL, NULL),
@@ -2835,6 +2849,7 @@ standardConfig configs[] = {
 
     /* Unsigned Long Long configs */
     createULongLongConfig("maxmemory", NULL, MODIFIABLE_CONFIG, 0, ULLONG_MAX, server.maxmemory, 0, MEMORY_CONFIG, NULL, updateMaxmemory),
+    createULongLongConfig("swap-hotmemory", NULL, MODIFIABLE_CONFIG, 0, ULLONG_MAX, server.swap_hotmemory, 0, MEMORY_CONFIG, NULL, updateSwapHotmemory),
     createULongLongConfig("swap-cuckoofilter-size-for-level", NULL, IMMUTABLE_CONFIG, 0, ULLONG_MAX, server.swap_cuckoofilter_size_for_level, 64*1024*1024, MEMORY_CONFIG, NULL, NULL),
     createULongLongConfig("rocksdb-max-total-wal-size", NULL, IMMUTABLE_CONFIG, 0, ULLONG_MAX, server.rocksdb_max_total_wal_size, 512*1024*1024, MEMORY_CONFIG, NULL, NULL),
     createULongLongConfig("rocksdb-min-blob-size", NULL, MODIFIABLE_CONFIG, 0, ULLONG_MAX, server.rocksdb_min_blob_size, 4096, MEMORY_CONFIG, NULL, updateRocksdbDataMinBlobSize),

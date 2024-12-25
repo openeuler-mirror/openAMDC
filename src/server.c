@@ -1339,7 +1339,10 @@ uint64_t dictEncObjHash(const void *key) {
  * if dict load factor exceeds HASHTABLE_MAX_LOAD_FACTOR. */
 int dictExpandAllowed(size_t moreMem, double usedRatio) {
     if (usedRatio <= HASHTABLE_MAX_LOAD_FACTOR) {
-        return !overMaxmemoryAfterAlloc(moreMem);
+        if (server.swap_enabled)
+            return !overSwapHotmemoryAfterAlloc(moreMem);
+        else
+            return !overMaxmemoryAfterAlloc(moreMem);
     } else {
         return 1;
     }
@@ -2206,9 +2209,15 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
 next:
-    /* Perform memory evictions if a maximum memory limit is configured */
-    if (server.maxmemory)
-        performEvictions();
+    if (server.swap_enabled) {
+        /* Perform swap data if a hot memory limit is configured */
+        if (server.swap_hotmemory)
+            performSwapData();
+    } else {
+        /* Perform memory evictions if a maximum memory limit is configured */
+        if (server.maxmemory)
+            performEvictions();
+    }
 
     /* We need to do a few operations on clients asynchronously. */
     clientsCron(threadId);
@@ -2238,25 +2247,27 @@ next:
     } else {
         /* If there is not a background saving/rewrite in progress check if
          * we have to save/rewrite now. */
-        for (j = 0; j < server.saveparamslen; j++) {
-            struct saveparam *sp = server.saveparams+j;
+        if (!server.swap_enabled) {
+            for (j = 0; j < server.saveparamslen; j++) {
+                struct saveparam *sp = server.saveparams+j;
 
-            /* Save if we reached the given amount of changes,
-             * the given amount of seconds, and if the latest bgsave was
-             * successful or if, in case of an error, at least
-             * CONFIG_BGSAVE_RETRY_DELAY seconds already elapsed. */
-            if (server.dirty >= sp->changes &&
-                server.unixtime-server.lastsave > sp->seconds &&
-                (server.unixtime-server.lastbgsave_try >
-                 CONFIG_BGSAVE_RETRY_DELAY ||
-                 server.lastbgsave_status == C_OK))
-            {
-                serverLog(LL_NOTICE,"%d changes in %d seconds. Saving...",
-                    sp->changes, (int)sp->seconds);
-                rdbSaveInfo rsi, *rsiptr;
-                rsiptr = rdbPopulateSaveInfo(&rsi);
-                rdbSaveBackground(server.rdb_filename,rsiptr);
-                break;
+                /* Save if we reached the given amount of changes,
+                * the given amount of seconds, and if the latest bgsave was
+                * successful or if, in case of an error, at least
+                * CONFIG_BGSAVE_RETRY_DELAY seconds already elapsed. */
+                if (server.dirty >= sp->changes &&
+                    server.unixtime-server.lastsave > sp->seconds &&
+                    (server.unixtime-server.lastbgsave_try >
+                    CONFIG_BGSAVE_RETRY_DELAY ||
+                    server.lastbgsave_status == C_OK))
+                {
+                    serverLog(LL_NOTICE,"%d changes in %d seconds. Saving...",
+                        sp->changes, (int)sp->seconds);
+                    rdbSaveInfo rsi, *rsiptr;
+                    rsiptr = rdbPopulateSaveInfo(&rsi);
+                    rdbSaveBackground(server.rdb_filename,rsiptr);
+                    break;
+                }
             }
         }
 
