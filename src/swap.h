@@ -56,10 +56,9 @@ typedef struct swapDataEntry {
     robj *key;
     robj *val;
     long long expiretime;
-    uint64_t version;
 } swapDataEntry;
 
-swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, robj *val, long long expiretime, uint64_t version);
+swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, robj *val, long long expiretime);
 void swapDataEntryRelease(swapDataEntry *entry);
 
 #define SWAP_DATA_ENTRY_BATCH_BUFFER_SIZE 16
@@ -69,6 +68,7 @@ typedef struct swapDataEntryBatch {
     struct swapDataEntry **entries;
     int capacity;
     int count;
+    int thread_id;
 } swapDataEntryBatch;
 
 swapDataEntryBatch *swapDataEntryBatchCreate(void);
@@ -91,9 +91,21 @@ swapPoolEntry *swapPoolEntryCreate(void);
 void swapPoolEntryRelease(swapPoolEntry *pool);
 void swapPoolPopulate(swapPoolEntry *pool, int dbid, dict *sampledict, dict *keydict);
 
+typedef struct swapThread {
+    int id;
+    pthread_t thread_id;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    list *pending_entries;
+} swapThread;
+
+void swapThreadInit(void);
+void swapThreadClose(void);
+
 typedef struct swapState {
     rocks *rocks; /* RocksDB data */
-    cuckooFilter coldFilter;
+    swapThread *swap_threads;
+    cuckooFilter cold_filter;
     swapDataEntryBatch *batch[MAX_THREAD_VAR];
     list *pending_entries[MAX_THREAD_VAR];
     swapPoolEntry *pool;

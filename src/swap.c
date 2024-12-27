@@ -163,14 +163,13 @@ void swapDataRetrievalRelease(swapDataRetrieval *r) {
 }
 
 /* Creates a new data entry for the swap process. */
-swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, robj *val, long long expiretime, uint64_t version) {
+swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, robj *val, long long expiretime) {
     swapDataEntry *req = zmalloc(sizeof(swapDataEntry));
     req->intention = intention;
     req->dbid = dbid;
     req->key = key;
     req->val = val;
     req->expiretime = expiretime;
-    req->version = version;
     incrRefCount(key);
     if (val)
         incrRefCount(val);
@@ -209,10 +208,35 @@ static int swapDataEntrySubmit(swapDataEntry *entry, int idx) {
     return C_OK;
 }
 
-static int swapMoveKeyOutOfMemory(swapDataEntry *entry) {
+/* Moves a key out of memory by unlinking it from the main dictionary and freeing resources. */
+static int swapMoveKeyOutOfMemory(swapDataEntry *entry, int async) {
     /* Ensure that the entry's intention is SAP_OUT. */
     serverAssert(entry->intention == SWAP_OUT);
     
+    /* If the operation is asynchronous, check if the key exists in the database and 
+     * compare versions to ensure the entry is up-to-date. */
+    if (async) {
+        robj *val;
+        int cur_version, old_version;
+
+        /* Look up the dictionary entry in the database using the provided key. */
+        dictEntry *de = dictFind(server.db[entry->dbid].dict, entry->key->ptr);
+        /* If the key does not exist in the database, return 0 (indicating no action needed). */
+        if (de == NULL) {
+            return 0;
+        }
+
+        /* Get the version of the value in the database and the entry's value. */
+        val = dictGetVal(de);
+        cur_version = getVersion(val);
+        old_version = getVersion(entry->val);
+        /* If the database value's version is newer than the entry's value, return 0 
+         * (indicating no action needed as the database has a more recent version). */
+        if (cur_version > old_version) {
+            return 0;
+        }
+    }
+
     /* If there are any expired keys in the database, remove this key from the expires dictionary. */
     if (dictSize(server.db[entry->dbid].expires) > 0)
         dictDelete(server.db[entry->dbid].expires,entry->key->ptr);
@@ -330,6 +354,7 @@ swapDataEntryBatch *swapDataEntryBatchCreate(void) {
     eb->entries = eb->entry_buf;
     eb->capacity = SWAP_DATA_ENTRY_BATCH_BUFFER_SIZE;
     eb->count = 0;
+    eb->thread_id = threadId;
     return eb;
 }
 
@@ -382,11 +407,31 @@ int swapDataEntryBatchSubmit(swapDataEntryBatch *eb, int idx) {
         /* Return the status of the batch processing. */
         return status;
     } else {
-        UNUSED(idx);
-        // TODO: Implement asynchronous swap processing
-    }
+        /* Determine the thread index for handling swap flush operations. */
+        if (idx == -1) {
+            static int dist;
+            if (dist < 0)
+                dist = 0;
+            /* Use the incremented value of dist to round-robin select a thread for load balancing. */
+            idx = (dist++) % server.swap_flush_threads_num;
+        } else {
+            /* If idx is specified, ensure it falls within the valid range. */
+            idx = idx % server.swap_flush_threads_num;
+        }
 
-    return C_OK;
+        /* Select the appropriate swap thread and add the entry to its pending list. */
+        swapThread *thread = server.swap->swap_threads + idx;
+        /* Lock the thread to safely modify its pending entries list. */
+        if (pthread_mutex_lock(&thread->lock) != 0) return C_ERR;
+        /* Add the entry to the end of the thread's pending entries list. */
+        listAddNodeTail(thread->pending_entries, eb);
+        /* Signal the condition variable to wake up the thread if it's waiting. */
+        if (pthread_cond_signal(&thread->cond) != 0) return C_ERR;
+        /* Unlock the thread after modifying its pending entries list. */
+        if (pthread_mutex_unlock(&thread->lock) != 0) return C_ERR;
+
+        return C_OK;
+    }
 }
 
 /* Process a batch of swap data entries. */
@@ -463,7 +508,7 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
             /* Check if the entry's intention is SWAP_OUT. */
             if (entry->intention == SWAP_OUT) {
                 /* Insert the key into the cold filter. */
-                if (cuckooFilterInsert(&server.swap->coldFilter,
+                if (cuckooFilterInsert(&server.swap->cold_filter,
                                        entry->key->ptr, 
                                        sdslen(entry->key->ptr)) != CUCKOO_FILTER_INSERTED) {
                     serverLog(LL_WARNING, "Cuckoo filter insert failed, key:%s", (sds)entry->key->ptr);
@@ -471,7 +516,7 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
                     goto cleanup;
                 }
                 /* Move the key out of memory according to the swap-out policy. */
-                serverAssert(swapMoveKeyOutOfMemory(entry));
+                serverAssert(swapMoveKeyOutOfMemory(entry, 0));
             }
         }
     }
@@ -482,6 +527,31 @@ cleanup:
     dictRelease(filter);
     rocksdb_writebatch_destroy(wb);
     return status;
+}
+
+/* Handles the completion of a batch of swap data entries. */
+static void swapDataEntryBatchComplete(void *var, aeAsyncCallback *callback) {
+    UNUSED(callback);
+    swapDataEntryBatch *eb = var;
+
+    /* Iterate through each entry in the batch and process it if its intention is SWAP_OUT. */
+    for (int i = 0; i < eb->count; i++) { 
+        swapDataEntry *entry = eb->entries[i];
+        /* Check if the entry's intention is SWAP_OUT. */
+        if (entry->intention == SWAP_OUT) {
+            /* Insert the key into the cold filter. */
+            if (cuckooFilterInsert(&server.swap->cold_filter,
+                                   entry->key->ptr, 
+                                   sdslen(entry->key->ptr)) != CUCKOO_FILTER_INSERTED) {
+                serverLog(LL_WARNING, "Cuckoo filter insert failed, key:%s", (sds)entry->key->ptr);
+            }
+            /* Move the key out of memory according to the swap-out policy. */
+            swapMoveKeyOutOfMemory(entry, 1);
+        }
+    }
+
+    /* Release the resources associated with the batch after processing. */
+    swapDataEntryBatchRelease(eb);
 }
 
 /* Creates and initializes a pool of swap entries. */
@@ -597,12 +667,111 @@ void swapPoolPopulate(swapPoolEntry *pool, int dbid, dict *sampledict, dict *key
     }
 }
 
+/* Main function for a swap thread that processes batches of swap data entries. */
+void *swapThreadMain(void *arg) {
+    char name[20];
+    swapThread *thread = arg;
+
+    /* Set the thread's name for identification purposes. */
+    snprintf(name, sizeof(name), "swap_thd:#%d", thread->id);
+    redis_set_thread_title(name);
+
+    listIter li;
+    listNode *ln;
+    list *processing_queue;
+
+    /* Infinite loop to continuously process pending entries. */
+    while (1) {
+        pthread_mutex_lock(&thread->lock);
+        /* Wait until there are pending entries to process. */
+        while (listLength(thread->pending_entries) == 0)
+            pthread_cond_wait(&thread->cond, &thread->lock);
+
+        /* Prepare a new processing queue and transfer all pending entries to it. */
+        listRewind(thread->pending_entries, &li);
+        processing_queue = listCreate();
+        while ((ln = listNext(&li))) {
+            swapDataEntryBatch *eb = listNodeValue(ln);
+            listAddNodeHead(processing_queue, eb);
+            listDelNode(thread->pending_entries, ln);
+        }
+        pthread_mutex_unlock(&thread->lock);
+
+        /* Process each batch in the processing queue. */
+        listRewind(processing_queue, &li);
+        while ((ln = listNext(&li))) {
+            swapDataEntryBatch *eb = listNodeValue(ln);
+            /* Process the batch of swap data entries. */
+            swapDataEntryBatchProcess(eb);
+            /* Schedule the completion callback asynchronously. */
+            aeAsyncFunction(server.el[eb->thread_id], swapDataEntryBatchComplete, eb, NULL, 1);
+        }
+        /* Release the processing queue after all batches have been processed. */
+        listRelease(processing_queue);
+    }
+
+    return NULL;
+}
+
+/* Initializes the swap threads for handling swap operations. */
+void swapThreadInit(void) {
+    /* If no swap flush threads are configured, return immediately. */
+    if (server.swap_flush_threads_num == 0) return;
+
+    server.swap->swap_threads = zmalloc(sizeof(swapThread) * server.swap_flush_threads_num);
+    for (int i = 0; i < server.swap_flush_threads_num; i++) {
+        swapThread *thread = server.swap->swap_threads + i;
+        thread->id = i;
+        thread->pending_entries = listCreate();
+
+        /* Initialize the mutex and condition variable for thread synchronization. */
+        pthread_mutex_init(&thread->lock, NULL);
+        pthread_cond_init(&thread->cond, NULL);
+
+        /* Create the thread with a specified stack size and start it with the main function `swapThreadMain`. */
+        pthread_attr_t tattr;
+        pthread_attr_init(&tattr);
+        pthread_attr_setstacksize(&tattr, 1 << 23); /* Set stack size to 8MB */
+
+        /* Create the thread and handle any creation errors. */
+        if (pthread_create(&thread->thread_id, &tattr, swapThreadMain, thread)) {
+            serverLog(LL_WARNING,"Fatal: Can't initialize swapThreadMain.");
+            exit(1);
+        }
+    }
+}
+
+/* Closes and cleans up the swap threads. */
+void swapThreadClose(void) {
+    /* Iterate through each configured swap thread. */
+    for (int i = 0; i < server.swap_flush_threads_num; i++) {
+        swapThread *thread = server.swap->swap_threads + i;
+        /* Skip the current thread if it is calling this function. */
+        if (thread->thread_id == pthread_self())
+            continue;
+        
+        /* Cancel and join the thread if it is active. */
+        if (thread->thread_id && pthread_cancel(thread->thread_id) == 0) {
+            /* Release the list of pending entries for this thread. */
+            listRelease(thread->pending_entries);
+            /* Wait for the thread to terminate. */
+            pthread_join(thread->thread_id, NULL);
+            /* Log a message indicating the thread has been terminated. */
+            serverLog(LL_WARNING, "Swap thread #%d terminated.", i);
+        }
+    }
+}
+
 /* Initializes the swap state. */
 void swapInit(void) {
     server.swap = zmalloc(sizeof(swapState));    
     server.swap->swap_data_version = 0;
     server.swap->hotmemory_policy = SWAP_HOTMEMORY_FLAG_LFU;
     server.swap->pool = swapPoolEntryCreate();
+
+    /* Initialize the swap thread, setting up necessary resources
+     * and configurations for thread execution. */
+    swapThreadInit();
 
     /* Initialize RocksDB and log a warning if initialization fails. */
     if (rocksInit() == C_ERR) {
@@ -611,7 +780,7 @@ void swapInit(void) {
     }
 
     /* Initialize the Cuckoo Filter and log a warning if initialization fails. */
-    if (cuckooFilterInit(&server.swap->coldFilter, 
+    if (cuckooFilterInit(&server.swap->cold_filter, 
                          server.swap_cuckoofilter_size_for_level,
                          server.swap_cuckoofilter_bucket_size,
                          CF_DEFAULT_MAX_ITERATIONS,
@@ -639,8 +808,9 @@ void swapRelease(void) {
             listRelease(server.swap->pending_entries[iel]);
         }
     }
+    swapThreadClose();
     swapPoolEntryRelease(server.swap->pool);
-    cuckooFilterFree(&server.swap->coldFilter);
+    cuckooFilterFree(&server.swap->cold_filter);
     rocksClose();
 }
 
@@ -754,10 +924,10 @@ static void swapData(int intention, robj *key, robj *val, int dbid) {
             expire = getExpire(server.db+dbid, key);
         /* Get and increment the swap data version number,
          * used to track the order of swap operations */
-        uint64_t version = server.swap->swap_data_version++;
+        setVersion(val, server.swap->swap_data_version++);
         /* Create a swap data entry object, encapsulating
          * the relevant information for the swap operation */
-        swapDataEntry *entry = swapDataEntryCreate(intention, dbid, key, val, expire, version);
+        swapDataEntry *entry = swapDataEntryCreate(intention, dbid, key, val, expire);
         /* Add the created swap data entry to the tail of
          * the pending requests list for the current thread*/
         listAddNodeTail(server.swap->pending_entries[threadId], entry);
@@ -973,7 +1143,6 @@ int performSwapData(void) {
         redisDb *db;
         dict *dict;
         dictEntry *de;
-        uint64_t version;
         long long expire = -1;
         swapDataEntry *entry;
         swapPoolEntry *pool = server.swap->pool;
@@ -1027,10 +1196,10 @@ int performSwapData(void) {
              * we only care about memory used by the key space. */
             delta = (long long) zmalloc_used_memory();
             latencyStartMonitor(swap_latency);
-            version = server.swap->swap_data_version++;
             expire = ((de = dictFind(db->expires,bestkey)) == NULL) ? -1 : dictGetSignedIntegerVal(de);
             valobj = ((de = dictFind(db->dict,bestkey)) == NULL) ? NULL : dictGetVal(de);
-            entry = swapDataEntryCreate(SWAP_OUT, bestdbid, keyobj, valobj, expire, version);
+            setVersion(valobj, server.swap->swap_data_version++);
+            entry = swapDataEntryCreate(SWAP_OUT, bestdbid, keyobj, valobj, expire);
             swapDataEntrySubmit(entry, -1);
             latencyEndMonitor(swap_latency);
             latencyAddSampleIfNeeded("hotmemory-trigger-swap-out", swap_latency);
@@ -1059,7 +1228,8 @@ int performSwapData(void) {
                 /* After some time, exit the loop early - even if memory limit
                  * hasn't been reached.  If we suddenly need to free a lot of
                  * memory, don't want to spend too much time here.  */
-                if (elapsedUs(swapTimer) > swap_time_limit_us) {
+                if (elapsedUs(swapTimer) > swap_time_limit_us ||
+                    server.swap_flush_threads_num > 0) {
                     /* We still need to free memory - start swap timer proc. */
                     if (!isSwapProcRunning) {
                         isSwapProcRunning = 1;

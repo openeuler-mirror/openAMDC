@@ -3310,10 +3310,15 @@ static void initNetworkingForThread(int iel) {
 }
 
 void *workerThread(void *arg) {
+    char name[20];
     int iel = (int)((int64_t)arg);
     threadId = iel;
-    tlsInitThread();
 
+    /* Set the thread's name for identification purposes. */
+    snprintf(name, sizeof(name), "worker_thd:#%d", iel);
+    redis_set_thread_title(name);
+
+    tlsInitThread();
     if (iel != MAIN_THREAD_ID) {
         WRAPPER_MUTEX_LOCK(gl, &globalLock);
         initNetworkingForThread(iel);
@@ -3327,8 +3332,14 @@ void *workerThread(void *arg) {
 }
 
 void *moduleThread(void *arg) {
+    char name[20];
     int iel = (int)((int64_t)arg);
     threadId = iel;
+
+    /* Set the thread's name for identification purposes. */
+    snprintf(name, sizeof(name), "module_thd:#%d", iel);
+    redis_set_thread_title(name);
+
     tlsInitThread();
     aeMain(server.el[iel]);
     aeDeleteEventLoop(server.el[iel]);
@@ -6734,12 +6745,19 @@ int main(int argc, char **argv) {
 
     pthread_attr_t tattr;
     pthread_attr_init(&tattr);
-    pthread_attr_setstacksize(&tattr, 1 << 23);
+    pthread_attr_setstacksize(&tattr, 1 << 23);  /* Set stack size to 8MB */
     for (int iel = 0; iel < server.worker_threads_num; ++iel) {
-        pthread_create(server.thread + iel, &tattr, workerThread, (void *)((int64_t)iel));
+        if (pthread_create(server.thread + iel, &tattr, workerThread, (void *)((int64_t)iel)) != 0) {
+            serverLog(LL_WARNING,"Fatal: Can't initialize workerThread.");
+            exit(1);
+        }
     }
-    if (server.worker_threads_num > 1)
-        pthread_create(server.thread + MODULE_THREAD_ID, &tattr, moduleThread, (void *)((int64_t)MODULE_THREAD_ID));
+    if (server.worker_threads_num > 1) {
+        if (pthread_create(server.thread + MODULE_THREAD_ID, &tattr, moduleThread, (void *)((int64_t)MODULE_THREAD_ID)) != 0) {
+            serverLog(LL_WARNING,"Fatal: Can't initialize moduleThread.");
+            exit(1);
+        }
+    }
 
     /* Block SIGALRM from this thread, it should only be received on a worker thread */
     sigset_t sigset;

@@ -669,7 +669,7 @@ typedef struct RedisModuleDigest {
 #define OBJ_SHARED_REFCOUNT INT_MAX     /* Global object never destroyed. */
 #define OBJ_STATIC_REFCOUNT (INT_MAX-1) /* Object allocated in the stack. */
 #define OBJ_FIRST_SPECIAL_REFCOUNT OBJ_STATIC_REFCOUNT
-#define OBJ_VERSION_INVALID ((1ULL << 62) - 1) 
+#define OBJ_VERSION_INVALID UINT64_MAX
 typedef struct redisObject {
     unsigned type:4;
     unsigned encoding:4;
@@ -679,6 +679,10 @@ typedef struct redisObject {
     redisAtomic int refcount;
     void *ptr;
 } robj;
+
+typedef struct redisObjectAugment {
+    uint64_t version;
+} robjAug;
 
 /* The a string name for an object's type as listed above
  * Native types are checked against the OBJ_STRING, OBJ_LIST, OBJ_* defines,
@@ -2050,6 +2054,8 @@ void afterPropagateExec();
 void decrRefCount(robj *o);
 void decrRefCountVoid(void *o);
 void incrRefCount(robj *o);
+void setVersion(robj *o, uint64_t version);
+uint64_t getVersion(robj *o);
 robj *makeObjectShared(robj *o);
 robj *resetRefCount(robj *obj);
 void freeStringObject(robj *o);

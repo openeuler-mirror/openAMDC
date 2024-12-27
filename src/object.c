@@ -22,11 +22,14 @@
 /* ===================== Creation and parsing of objects ==================== */
 
 robj *createObject(int type, void *ptr) {
-    robj *o = zmalloc(sizeof(*o));
+    size_t augsize = server.swap_enabled ? sizeof(robjAug) : 0;
+    char *bytes = zmalloc(augsize+sizeof(robj));
+    robj *o = (robj*)(bytes+augsize);
     o->type = type;
     o->encoding = OBJ_ENCODING_RAW;
     o->ptr = ptr;
     o->refcount = 1;
+    setVersion(o, OBJ_VERSION_INVALID);
 
     /* Set the LRU to the current lruclock (minutes resolution), or
      * alternatively the LFU counter. */
@@ -65,13 +68,16 @@ robj *createRawStringObject(const char *ptr, size_t len) {
  * an object where the sds string is actually an unmodifiable string
  * allocated in the same chunk as the object itself. */
 robj *createEmbeddedStringObject(const char *ptr, size_t len) {
-    robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr8)+len+1);
+    size_t augsize = server.swap_enabled ? sizeof(robjAug) : 0;
+    char *bytes = zmalloc(augsize+sizeof(robj)+sizeof(struct sdshdr8)+len+1);
+    robj *o = (robj*)(bytes+augsize);
     struct sdshdr8 *sh = (void*)(o+1);
 
     o->type = OBJ_STRING;
     o->encoding = OBJ_ENCODING_EMBSTR;
     o->ptr = sh+1;
     o->refcount = 1;
+    setVersion(o, OBJ_VERSION_INVALID);
     if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
         o->lru = (LFUGetTimeInMinutes()<<8) | LFU_INIT_VAL;
     } else {
@@ -356,6 +362,21 @@ void incrRefCount(robj *o) {
     }
 }
 
+void setVersion(robj *o, uint64_t version) {
+    if (!server.swap_enabled)
+        return;
+    robjAug *aug = (robjAug*)(o) - 1;
+    aug->version = version;
+}
+
+uint64_t getVersion(robj *o) {
+    if (server.swap_enabled) {
+        robjAug *aug = (robjAug*)(o) - 1;
+        return aug->version;
+    }
+    return OBJ_VERSION_INVALID;
+}
+
 void decrRefCount(robj *o) {
     if (o->refcount == 1) {
         switch(o->type) {
@@ -368,7 +389,10 @@ void decrRefCount(robj *o) {
         case OBJ_STREAM: freeStreamObject(o); break;
         default: serverPanic("Unknown object type"); break;
         }
-        zfree(o);
+        if (server.swap_enabled)
+            zfree((robjAug*)(o)-1);
+        else
+            zfree(o);
     } else {
         if (o->refcount <= 0) serverPanic("decrRefCount against refcount <= 0");
         if (o->refcount != OBJ_SHARED_REFCOUNT) o->refcount--;

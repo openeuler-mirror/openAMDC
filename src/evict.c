@@ -329,7 +329,7 @@ size_t freeMemoryGetNotCountedMemory(void) {
     }
     if (server.swap_enabled) {
         cuckooFilterStat status;
-        cuckooFilterGetStat(&server.swap->coldFilter, &status);
+        cuckooFilterGetStat(&server.swap->cold_filter, &status);
         overhead += status.used_memory;
     }
     return overhead;
