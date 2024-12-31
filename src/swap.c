@@ -21,6 +21,7 @@
 
 static sds swapDataEncodeObject(swapDataEntry *entry);
 static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len);
+static void swapDataEntryBatchFinished(swapDataEntryBatch *eb, int async);
 
 /* Swap data entry batch filter type */
 dictType swapBatchFilterType = {
@@ -402,6 +403,8 @@ int swapDataEntryBatchSubmit(swapDataEntryBatch *eb, int idx) {
     if (server.swap_flush_threads_num == 0) {
         /* Process the batch synchronously. */
         int status = swapDataEntryBatchProcess(eb);
+        /* Inserts the key into the cold filter and moves the key out of memory. */
+        swapDataEntryBatchFinished(eb, 0);
         /* Release the batch after processing. */
         swapDataEntryBatchRelease(eb);
         /* Return the status of the batch processing. */
@@ -499,28 +502,6 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
     latencyEndMonitor(swap_latency);
     latencyAddSampleIfNeeded("swap-batch", swap_latency);
 
-    /* Check if there are no swap flush threads running. */
-    if (server.swap_flush_threads_num == 0) {
-        /* Iterate over each entry in the dictionary. */
-        iter = dictGetIterator(filter);
-        while((de = dictNext(iter)) != NULL) {
-            swapDataEntry *entry = dictGetVal(de);
-            /* Check if the entry's intention is SWAP_OUT. */
-            if (entry->intention == SWAP_OUT) {
-                /* Insert the key into the cold filter. */
-                if (cuckooFilterInsert(&server.swap->cold_filter,
-                                       entry->key->ptr, 
-                                       sdslen(entry->key->ptr)) != CUCKOO_FILTER_INSERTED) {
-                    serverLog(LL_WARNING, "Cuckoo filter insert failed, key:%s", (sds)entry->key->ptr);
-                    status = C_ERR;
-                    goto cleanup;
-                }
-                /* Move the key out of memory according to the swap-out policy. */
-                serverAssert(swapMoveKeyOutOfMemory(entry, 0));
-            }
-        }
-    }
-
 cleanup:
     /* Release resources. */
     dictReleaseIterator(iter);
@@ -529,12 +510,9 @@ cleanup:
     return status;
 }
 
-/* Handles the completion of a batch of swap data entries. */
-static void swapDataEntryBatchComplete(void *var, aeAsyncCallback *callback) {
-    UNUSED(callback);
-    swapDataEntryBatch *eb = var;
-
-    /* Iterate through each entry in the batch and process it if its intention is SWAP_OUT. */
+/* Inserts the key into the cold filter and moves the key out of memory according to the swap-out policy. */
+static void swapDataEntryBatchFinished(swapDataEntryBatch *eb, int async) {
+    /* Iterate through each entry in the batch. */
     for (int i = 0; i < eb->count; i++) { 
         swapDataEntry *entry = eb->entries[i];
         /* Check if the entry's intention is SWAP_OUT. */
@@ -546,10 +524,17 @@ static void swapDataEntryBatchComplete(void *var, aeAsyncCallback *callback) {
                 serverLog(LL_WARNING, "Cuckoo filter insert failed, key:%s", (sds)entry->key->ptr);
             }
             /* Move the key out of memory according to the swap-out policy. */
-            swapMoveKeyOutOfMemory(entry, 1);
+            swapMoveKeyOutOfMemory(entry, async);
         }
     }
+}
 
+/* Handles the completion of a batch of swap data entries. */
+static void swapDataEntryBatchComplete(void *var, aeAsyncCallback *callback) {
+    UNUSED(callback);
+    swapDataEntryBatch *eb = var;
+    /* Inserts the key into the cold filter and moves the key out of memory. */
+    swapDataEntryBatchFinished(eb, 1);
     /* Release the resources associated with the batch after processing. */
     swapDataEntryBatchRelease(eb);
 }
@@ -1069,7 +1054,7 @@ static int isSafeToPerformSwapData(void) {
 }
 
 /* Algorithm for converting tenacity (0-100) to a time limit.  */
-static unsigned long swapTimeLimitUs() {
+static unsigned long swapTimeLimitUs(void) {
     serverAssert(server.swap_hotmemory_eviction_tenacity >= 0);
     serverAssert(server.swap_hotmemory_eviction_tenacity <= 100);
 
@@ -1110,7 +1095,6 @@ static unsigned long swapTimeLimitUs() {
  *   SWAP_RUNNING  - hotmemory is over the limit, but swap data is still processing
  *   SWAP_FAIL     - hotmemory is over the limit, and there's nothing to swap
  * */
-
 int performSwapData(void) {
     serverAssert(threadOwnLock());
     serverAssert(server.swap->hotmemory_policy == SWAP_HOTMEMORY_FLAG_LFU);
@@ -1227,7 +1211,7 @@ int performSwapData(void) {
 
                 /* After some time, exit the loop early - even if memory limit
                  * hasn't been reached.  If we suddenly need to free a lot of
-                 * memory, don't want to spend too much time here.  */
+                 * memory, don't want to spend too much time here. */
                 if (elapsedUs(swapTimer) > swap_time_limit_us ||
                     server.swap_flush_threads_num > 0) {
                     /* We still need to free memory - start swap timer proc. */
