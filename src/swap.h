@@ -109,7 +109,7 @@ typedef struct swapState {
     swapDataEntryBatch *batch[MAX_THREAD_VAR];
     list *pending_entries[MAX_THREAD_VAR];
     swapPoolEntry *pool;
-    uint64_t swap_data_version;
+    redisAtomic uint64_t swap_data_version;
     int hotmemory_policy;
 } swapState;
 

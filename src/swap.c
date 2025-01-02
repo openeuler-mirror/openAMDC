@@ -257,6 +257,7 @@ static int swapMoveKeyOutOfMemory(swapDataEntry *entry, int async) {
 static sds swapDataEncodeObject(swapDataEntry *entry) {
     uint8_t b[1];
     rio payload;
+    uint64_t version;
     int rdb_compression = server.rdb_compression;
     server.rdb_compression = 0;
 
@@ -280,6 +281,11 @@ static sds swapDataEncodeObject(swapDataEntry *entry) {
     if (rdbSaveType(&payload, RDB_OPCODE_FREQ) == -1) goto werr;
     if (rioWrite(&payload, b,1) == 0) goto werr;
 
+    /* Save obj version */
+    version = getVersion(entry->val);
+    if (rdbSaveType(&payload, RDB_OPCODE_VERSION) == -1) goto werr;
+    if (rdbSaveLen(&payload, version) == -1) goto werr;
+
     /* Save type, value */
     if (rdbSaveObjectType(&payload, entry->val) == -1) goto werr;
     if (rdbSaveObject(&payload, entry->val, entry->key) == -1) goto werr;
@@ -301,6 +307,7 @@ static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len)
     rio payload;
     robj *val = NULL;
     swapDataRetrieval *r = NULL;
+    uint64_t version;
     int type, error, dbid = 0;
     long long lfu_freq = -1, expiretime = -1;
     rioInitWithCBuffer(&payload, buf, len);
@@ -323,6 +330,9 @@ static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len)
                 goto rerr;
             lfu_freq = byte;
             continue;
+        } else if (type == RDB_OPCODE_VERSION) {
+            if ((version = rdbLoadLen(&payload, NULL)) == -1) goto rerr;
+            continue;
         } else if (type == RDB_OPCODE_EOF) {
             break;
         }
@@ -339,6 +349,7 @@ static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len)
                 goto rerr;
             }
         } else {
+            setVersion(val, version);
             r = swapDataRetrievalCreate(dbid, val, expiretime, lfu_freq);
         }
     }
@@ -900,16 +911,13 @@ static void swapData(int intention, robj *key, robj *val, int dbid) {
     /* Check if the server has swap functionality enabled,
      * return immediately if not */
     if (!server.swap_enabled) return;
-    
+
     if (!server.swap_hotmemory) {
         /* If the intention of the swap operation is to swap
          * out, retrieve the expiration time of the key */
         long long expire = -1;
         if (intention == SWAP_OUT)
             expire = getExpire(server.db+dbid, key);
-        /* Get and increment the swap data version number,
-         * used to track the order of swap operations */
-        setVersion(val, server.swap->swap_data_version++);
         /* Create a swap data entry object, encapsulating
          * the relevant information for the swap operation */
         swapDataEntry *entry = swapDataEntryCreate(intention, dbid, key, val, expire);
@@ -1182,7 +1190,6 @@ int performSwapData(void) {
             latencyStartMonitor(swap_latency);
             expire = ((de = dictFind(db->expires,bestkey)) == NULL) ? -1 : dictGetSignedIntegerVal(de);
             valobj = ((de = dictFind(db->dict,bestkey)) == NULL) ? NULL : dictGetVal(de);
-            setVersion(valobj, server.swap->swap_data_version++);
             entry = swapDataEntryCreate(SWAP_OUT, bestdbid, keyobj, valobj, expire);
             swapDataEntrySubmit(entry, -1);
             latencyEndMonitor(swap_latency);

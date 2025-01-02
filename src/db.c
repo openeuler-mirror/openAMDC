@@ -200,6 +200,7 @@ robj *lookupKeyWriteOrReply(client *c, robj *key, robj *reply) {
 void dbAdd(redisDb *db, robj *key, robj *val) {
     sds copy = sdsdup(key->ptr);
     int retval = dictAdd(db->dict, copy, val);
+    if (server.swap_enabled) setVersion(val, getGblVersion());
 
     serverAssertWithInfo(NULL,key,retval == DICT_OK);
     signalKeyAsReady(db, key, val->type);
@@ -238,6 +239,7 @@ void dbOverwrite(redisDb *db, robj *key, robj *val) {
     if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
         val->lru = old->lru;
     }
+    if (server.swap_enabled) setVersion(val, getGblVersion());
     /* Although the key is not really deleted from the database, we regard 
     overwrite as two steps of unlink+add, so we still need to call the unlink 
     callback of the module. */

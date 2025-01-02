@@ -681,7 +681,7 @@ typedef struct redisObject {
 } robj;
 
 typedef struct redisObjectAugment {
-    uint64_t version;
+    redisAtomic uint64_t version;
 } robjAug;
 
 /* The a string name for an object's type as listed above
@@ -2056,6 +2056,8 @@ void decrRefCountVoid(void *o);
 void incrRefCount(robj *o);
 void setVersion(robj *o, uint64_t version);
 uint64_t getVersion(robj *o);
+void incrGblVersion(void);
+uint64_t getGblVersion(void);
 robj *makeObjectShared(robj *o);
 robj *resetRefCount(robj *obj);
 void freeStringObject(robj *o);

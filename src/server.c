@@ -3931,6 +3931,8 @@ void call(client *c, int flags) {
         updateCachedTimeWithUs(0,call_timer);
     }
 
+    incrGblVersion();
+
     monotime monotonic_start = 0;
     if (monotonicGetType() == MONOTONIC_CLOCK_HW)
         monotonic_start = getMonotonicUs();

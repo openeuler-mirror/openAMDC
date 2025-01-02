@@ -366,15 +366,31 @@ void setVersion(robj *o, uint64_t version) {
     if (!server.swap_enabled)
         return;
     robjAug *aug = (robjAug*)(o) - 1;
-    aug->version = version;
+    atomicSet(aug->version, version);
 }
 
 uint64_t getVersion(robj *o) {
     if (server.swap_enabled) {
+        uint64_t version;
         robjAug *aug = (robjAug*)(o) - 1;
-        return aug->version;
+        atomicGet(aug->version, version);
+        return version;
     }
     return OBJ_VERSION_INVALID;
+}
+
+void incrGblVersion(void) {
+    if (!server.swap_enabled) return;
+
+    atomicIncr(server.swap->swap_data_version, 1);
+}
+
+uint64_t getGblVersion(void) {
+    if (!server.swap_enabled) return OBJ_VERSION_INVALID;
+
+    uint64_t version;
+    atomicGet(server.swap->swap_data_version, version);
+    return version;
 }
 
 void decrRefCount(robj *o) {
