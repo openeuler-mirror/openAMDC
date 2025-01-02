@@ -412,6 +412,62 @@ void cuckooFilterGetStat(const cuckooFilter *filter, cuckooFilterStat *stat) {
     stat->load_factor = (double)stat->numItems / total_slots;
 }
 
+/**
+ * Encodes a cuckoo filter into a contiguous memory buffer
+ */
+char *cuckooFiltrEncodeChunk(cuckooFilter *filter) {
+    size_t cuckooFilterTableSize = filter->numBuckets * filter->bucketSize * sizeof(CuckooFingerprint);
+    char *buf = CUCKOO_MALLOC(sizeof(cuckooFilterHeader) + filter->numFilters * cuckooFilterTableSize);
+
+    cuckooFilterHeader header = (cuckooFilterHeader) {
+        .numBuckets = filter->numBuckets,
+        .numItems = filter->numItems,
+        .numDeletes = filter->numDeletes,
+        .numFilters = filter->numFilters,
+        .bucketSize = filter->bucketSize,
+        .maxIterations = filter->maxIterations,
+        .expansion = filter->expansion};
+    memcpy(buf, &header, sizeof(cuckooFilterHeader));
+
+    for (uint16_t i = 0; i < filter->numFilters; i++) {
+        size_t offset = sizeof(cuckooFilterHeader) + i * cuckooFilterTableSize;
+        cuckooFilterTable *table = filter->tables + i;
+        memcpy(buf + offset, table->data, cuckooFilterTableSize);
+    }
+
+    return buf;
+}
+
+/**
+ * Decodes a cuckoo filter from a contiguous memory buffer
+ */
+cuckooFilter *cuckooFiltrDecodeChunk(const char *buf, size_t len) {
+    assert(len >= sizeof(cuckooFilterHeader));
+    cuckooFilterHeader header;
+    memcpy(&header, buf, sizeof(cuckooFilterHeader));
+
+    cuckooFilter *filter = CUCKOO_MALLOC(sizeof(cuckooFilter));
+    filter->numBuckets = header.numBuckets;
+    filter->numItems = header.numItems;
+    filter->numDeletes = header.numDeletes;
+    filter->numFilters = header.numFilters;
+    filter->bucketSize = header.bucketSize;
+    filter->maxIterations = header.maxIterations;
+    filter->expansion = header.expansion;
+    filter->tables = CUCKOO_MALLOC(sizeof(cuckooFilterTable) * filter->numFilters);
+
+    size_t cuckooFilterTableSize = filter->numBuckets * filter->bucketSize * sizeof(CuckooFingerprint);
+    for (uint16_t i = 0; i < filter->numFilters; i++) {
+        size_t offset = sizeof(cuckooFilterHeader) + i * cuckooFilterTableSize;
+        cuckooFilterTable *table = filter->tables + i;
+        table->bucketSize = filter->bucketSize;
+        table->numBuckets = filter->numBuckets;
+        memcpy(table->data, buf + offset, cuckooFilterTableSize);
+    }
+
+    return filter;
+}
+
 // Returns 0 on success
 int cuckooFilterValidateIntegrity(const cuckooFilter *filter) {
     if (filter->bucketSize == 0 || filter->bucketSize > CF_MAX_BUCKET_SIZE ||

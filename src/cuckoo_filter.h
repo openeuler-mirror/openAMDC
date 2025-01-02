@@ -31,6 +31,16 @@ typedef uint16_t CuckooFingerprint;
 #define CF_MAX_NUM_BUCKETS (0x00FFFFFFFFFFFFFFULL) // 56 bits, see struct SubCF
 #define CF_MAX_NUM_FILTERS (UINT16_MAX)            // 16 bits, see struct CuckooFilter
 
+typedef struct __attribute__((packed)) {
+    uint64_t numBuckets;
+    uint64_t numItems;
+    uint64_t numDeletes;
+    uint16_t numFilters;
+    uint16_t bucketSize;
+    uint16_t maxIterations;
+    uint16_t expansion;
+} cuckooFilterHeader;
+
 typedef struct cuckooFilterStat {
     size_t numItems;
     size_t numDeletes;
@@ -78,6 +88,8 @@ int cuckooFilterContains(const cuckooFilter *filter, const char *key, size_t kle
 uint64_t cuckooFilterCount(const cuckooFilter *filter, const char *key, size_t klen);
 void cuckooFilterCompact(cuckooFilter *filter, bool cont);
 void cuckooFilterGetStat(const cuckooFilter *filter, cuckooFilterStat *stat);
+char *cuckooFiltrEncodeChunk(cuckooFilter *filter);
+cuckooFilter *cuckooFiltrDecodeChunk(const char *buf, size_t len);
 int cuckooFilterValidateIntegrity(const cuckooFilter *filter);
 void cuckooFilterSetHashFunctionSeed(uint8_t *seed);
 
