@@ -4598,7 +4598,7 @@ int prepareForShutdown(int flags) {
     }
 
     /* Create a new RDB file before exiting. */
-    if ((server.saveparamslen > 0 && !nosave) || save) {
+    if (!server.swap_enabled && ((server.saveparamslen > 0 && !nosave) || save)) {
         serverLog(LL_NOTICE,"Saving the final RDB snapshot before exiting.");
         if (server.supervised_mode == SUPERVISED_SYSTEMD)
             redisCommunicateSystemd("STATUS=Saving the final RDB snapshot\n");
@@ -4624,8 +4624,7 @@ int prepareForShutdown(int flags) {
         if (server.supervised_mode == SUPERVISED_SYSTEMD)
             redisCommunicateSystemd("STATUS=Swapping the data to RocksDB\n");
         
-        // TODO swap hot data to RocksDB
-
+        /* Release the memory and swap the data to RocksDB */
         swapRelease();
     }
 

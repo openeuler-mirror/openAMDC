@@ -74,7 +74,7 @@ typedef struct swapDataEntryBatch {
 swapDataEntryBatch *swapDataEntryBatchCreate(void);
 void swapDataEntryBatchRelease(swapDataEntryBatch *eb);
 void swapDataEntryBatchAdd(swapDataEntryBatch *eb, swapDataEntry *entry);
-int swapDataEntryBatchSubmit(swapDataEntryBatch *eb, int idx);
+int swapDataEntryBatchSubmit(swapDataEntryBatch *eb, int idx, int force);
 int swapDataEntryBatchProcess(swapDataEntryBatch *eb);
 
 #define SWAP_POOL_SIZE 16
@@ -118,7 +118,8 @@ void swapRelease(void);
 robj *swapIn(robj* key, int dbid);
 void swapOut(robj* key, robj *val, int dbid);
 void swapDel(robj* key, int dbid);
-int swapFlushThread(int iel);
+int swapFlushThread(int iel, int force);
+int swapHotmemorySave(void);
 int performSwapData(void);
 int overSwapHotmemoryAfterAlloc(size_t moremem);
 void swapProcessPendingEntries(int iel);

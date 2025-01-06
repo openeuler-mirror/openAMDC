@@ -19,6 +19,9 @@
 
 #define ROCKSDB_DIR "rocksdb.data"
 
+#define META_CF 0
+#define DB_CF(dbid) (dbid+1)
+
 static sds swapDataEncodeObject(swapDataEntry *entry);
 static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len);
 static void swapDataEntryBatchFinished(swapDataEntryBatch *eb, int async);
@@ -44,9 +47,10 @@ int rocksInit(void) {
 /* Opens or creates the RocksDB database. */
 int rocksOpen(struct rocks *rocks) {
     char *errs = NULL;
-    char **cf_names = zmalloc(sizeof(char *) * server.dbnum);
-    rocksdb_options_t **cf_opts = zmalloc(sizeof(rocksdb_options_t *) * server.dbnum);
-    rocks->cf_handles = zmalloc(sizeof(rocksdb_column_family_handle_t *) * server.dbnum);
+    int num_column_families = server.dbnum + 1;
+    char **cf_names = zmalloc(sizeof(char *) * num_column_families);
+    rocksdb_options_t **cf_opts = zmalloc(sizeof(rocksdb_options_t *) * num_column_families);
+    rocks->cf_handles = zmalloc(sizeof(rocksdb_column_family_handle_t *) * num_column_families);
     rocks->db_opts = rocksdb_options_create();
     rocksdb_options_set_create_if_missing(rocks->db_opts, 1);
     rocksdb_options_set_create_missing_column_families(rocks->db_opts, 1);
@@ -81,10 +85,11 @@ int rocksOpen(struct rocks *rocks) {
     rocksdb_options_set_WAL_ttl_seconds(rocks->db_opts, server.rocksdb_WAL_ttl_seconds);
     rocksdb_options_set_WAL_size_limit_MB(rocks->db_opts, server.rocksdb_WAL_size_limit_MB);
     rocksdb_options_set_max_total_wal_size(rocks->db_opts, server.rocksdb_max_total_wal_size);
-    
-    /* Configure each database's column families. */
-    for (int i = 0; i < server.dbnum; i++) {
-        cf_names[i] = i == 0 ? sdsnew("default") : sdscatfmt(sdsempty(), "db%d", i);
+
+    /* Configure each column families. */
+    for (int i = 0; i < num_column_families; i++) {
+        /* Default column is used to store meta information. */
+        cf_names[i] = i == 0 ? sdsnew("default") : sdscatfmt(sdsempty(), "db%d", i-1);
         cf_opts[i] = rocksdb_options_create_copy(rocks->db_opts);
         rocksdb_options_set_compression(cf_opts[i], server.rocksdb_compression);
         rocksdb_options_set_level0_slowdown_writes_trigger(cf_opts[i], server.rocksdb_level0_slowdown_writes_trigger);
@@ -113,7 +118,7 @@ int rocksOpen(struct rocks *rocks) {
     }
     
     /* Open the database. */
-    rocks->db = rocksdb_open_column_families(rocks->db_opts, ROCKSDB_DIR, server.dbnum, (const char *const *)cf_names,
+    rocks->db = rocksdb_open_column_families(rocks->db_opts, ROCKSDB_DIR, num_column_families, (const char *const *)cf_names,
                                              (const rocksdb_options_t *const *)cf_opts, rocks->cf_handles, &errs);
     if (errs != NULL) {
         serverLog(LL_WARNING, "Rocksdb open column families failed: %s", errs);
@@ -122,7 +127,7 @@ int rocksOpen(struct rocks *rocks) {
     }
     
     /* Clean up resources. */
-    for (int i = 0; i < server.dbnum; i++) {
+    for (int i = 0; i < num_column_families; i++) {
         sdsfree(cf_names[i]);
         rocksdb_options_destroy(cf_opts[i]);
     }
@@ -134,11 +139,12 @@ int rocksOpen(struct rocks *rocks) {
 
 /* Closes the RocksDB database. */
 void rocksClose(void) {
+    int num_column_families = server.dbnum + 1;
     struct rocks *rocks = server.swap->rocks;
     rocksdb_cancel_all_background_work(rocks->db, 1);
     if (rocks->snapshot)
         rocksdb_release_snapshot(rocks->db, rocks->snapshot);
-    for (int i = 0; i < server.dbnum; i++) {
+    for (int i = 0; i < num_column_families; i++) {
         rocksdb_column_family_handle_destroy(rocks->cf_handles[i]);
     }
     rocksdb_options_destroy(rocks->db_opts);
@@ -199,7 +205,7 @@ static int swapDataEntrySubmit(swapDataEntry *entry, int idx) {
     /* Check if the current batch for the thread has reached its maximum size. */
     if (server.swap->batch[threadId]->count >= server.swap_data_entry_batch_size) {
         /* If the batch is full, submit the current batch and handle any errors. */
-        if (swapDataEntryBatchSubmit(server.swap->batch[threadId], idx) == C_ERR)
+        if (swapDataEntryBatchSubmit(server.swap->batch[threadId], idx, 0) == C_ERR)
             return C_ERR;
 
         /* Create a new batch for the thread after submitting the old one. */
@@ -307,8 +313,8 @@ static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len)
     rio payload;
     robj *val = NULL;
     swapDataRetrieval *r = NULL;
-    uint64_t version;
-    int type, error, dbid = 0;
+    int type, error;
+    uint64_t version, dbid = 0;
     long long lfu_freq = -1, expiretime = -1;
     rioInitWithCBuffer(&payload, buf, len);
     while (1) {
@@ -318,7 +324,7 @@ static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len)
 
         /* Handle special types. */
         if (type == RDB_OPCODE_SELECTDB) {
-            if ((dbid = rdbLoadLen(&payload, NULL)) == -1) goto rerr;
+            if ((dbid = rdbLoadLen(&payload, NULL)) == RDB_LENERR) goto rerr;
             continue;
         } else if (type == RDB_OPCODE_EXPIRETIME_MS) {
             if ((expiretime = rdbLoadMillisecondTime(&payload, RDB_VERSION)) == -1)
@@ -331,7 +337,7 @@ static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len)
             lfu_freq = byte;
             continue;
         } else if (type == RDB_OPCODE_VERSION) {
-            if ((version = rdbLoadLen(&payload, NULL)) == -1) goto rerr;
+            if ((version = rdbLoadLen(&payload, NULL)) == RDB_LENERR) goto rerr;
             continue;
         } else if (type == RDB_OPCODE_EOF) {
             break;
@@ -350,7 +356,7 @@ static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len)
             }
         } else {
             setVersion(val, version);
-            r = swapDataRetrievalCreate(dbid, val, expiretime, lfu_freq);
+            r = swapDataRetrievalCreate((int)dbid, val, expiretime, lfu_freq);
         }
     }
     return r;
@@ -409,9 +415,9 @@ void swapDataEntryBatchAdd(swapDataEntryBatch *eb, swapDataEntry *entry) {
 }
 
 /* Submits a batch of swap data entries for processing. */
-int swapDataEntryBatchSubmit(swapDataEntryBatch *eb, int idx) {
+int swapDataEntryBatchSubmit(swapDataEntryBatch *eb, int idx, int force) {
     /* Check if there are no swap flush threads running. */
-    if (server.swap_flush_threads_num == 0) {
+    if (server.swap_flush_threads_num == 0 || force) {
         /* Process the batch synchronously. */
         int status = swapDataEntryBatchProcess(eb);
         /* Inserts the key into the cold filter and moves the key out of memory. */
@@ -485,7 +491,12 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
                 goto cleanup;
             }
             /* Add the encoded object to the RocksDB write batch. */
-            rocksdb_writebatch_put(wb, entry->key->ptr, sdslen(entry->key->ptr), buf, sdslen(buf));
+            rocksdb_writebatch_put_cf(wb,
+                                      server.swap->rocks->cf_handles[DB_CF(entry->dbid)],
+                                      entry->key->ptr,
+                                      sdslen(entry->key->ptr),
+                                      buf,
+                                      sdslen(buf));
             /* Free the encoded buffer. */
             sdsfree(buf);
             /* Increment the total count of swap out keys in the swap statistics. */
@@ -493,7 +504,10 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
         /* Handle entries with intention to delete. */
         } else if (entry->intention == SWAP_DEL) {
             /* Delete the key from RocksDB using the write batch. */
-            rocksdb_writebatch_delete(wb, entry->key->ptr, sdslen(entry->key->ptr));
+            rocksdb_writebatch_delete_cf(wb,
+                                         server.swap->rocks->cf_handles[DB_CF(entry->dbid)],
+                                         entry->key->ptr,
+                                         sdslen(entry->key->ptr));
             /* Increment the total count of deleted keys in the swap statistics. */
             server.stat_swap_del_keys_total++;
         } else {
@@ -797,28 +811,35 @@ void swapInit(void) {
 
 /* Releases resources and performs cleanup operations related to the swap process. */
 void swapRelease(void) {
+    /* Flushes the swap batch first. */
     for (int iel = 0; iel < MAX_THREAD_VAR; ++iel) {
         if (iel < server.worker_threads_num || 
             (iel == MODULE_THREAD_ID && server.worker_threads_num > 1)) {
-            swapFlushThread(iel);
+            swapFlushThread(iel, 1);
             listRelease(server.swap->pending_entries[iel]);
         }
     }
+    /* Swap hot data to RocksDB. */
+    swapHotmemorySave();
+    /* Close the swap threads. */
     swapThreadClose();
+    /* Release the swap pool. */
     swapPoolEntryRelease(server.swap->pool);
+    /* Release the Cuckoo Filter. */
     cuckooFilterFree(&server.swap->cold_filter);
+    /* Close the RocksDB */
     rocksClose();
 }
 
 /* Flushes the swap batch at iel worker thread. */
-int swapFlushThread(int iel) {
+int swapFlushThread(int iel, int force) {
     /* Check if the server has swap functionality enabled,
      * return immediately if not */
     if (!server.swap_enabled) return C_OK;
     
     if (server.swap->batch[iel]) {
         /* Submit the current batch for processing. */
-        if (swapDataEntryBatchSubmit(server.swap->batch[iel], -1) == C_ERR) {
+        if (swapDataEntryBatchSubmit(server.swap->batch[iel], -1, force) == C_ERR) {
             return C_ERR;
         }
         /* Create a new batch for future entries. */
@@ -845,7 +866,7 @@ robj *swapIn(robj *key, int dbid) {
     /* Use RocksDB to get the value associated with the key from the specified cf_handles. */
     val = rocksdb_get_cf(server.swap->rocks->db,
                          server.swap->rocks->ropts,
-                         server.swap->rocks->cf_handles[dbid],
+                         server.swap->rocks->cf_handles[DB_CF(dbid)],
                          key->ptr,
                          sdslen(key->ptr),
                          &vallen,
@@ -873,7 +894,7 @@ robj *swapIn(robj *key, int dbid) {
         decrRefCount(o);
         rocksdb_delete_cf(server.swap->rocks->db,
                           server.swap->rocks->wopts,
-                          server.swap->rocks->cf_handles[dbid],
+                          server.swap->rocks->cf_handles[DB_CF(dbid)],
                           key->ptr,
                           sdslen(key->ptr),
                           &err);
@@ -1079,6 +1100,115 @@ static unsigned long swapTimeLimitUs(void) {
     return ULONG_MAX;   /* No limit to swap time */
 }
 
+/* Save hot data to RocksDB. */
+int swapHotmemorySave(void) {
+    if (!server.swap_hotmemory) return C_OK;
+    
+    sds buf = NULL;
+    size_t len;
+    char *cf_buf = NULL;
+    char *err = NULL;
+    swapDataEntry *entry = NULL;
+    sds name = NULL, swap_data_version = NULL;
+    dictEntry *de;
+    dictIterator *di = NULL;
+
+    /* Iterate over each database. */
+    for (int i = 0; i < server.dbnum; i++) {
+        redisDb *db = server.db+i;
+        dict *d = db->dict;
+        if (dictSize(d) == 0) continue;
+        di = dictGetSafeIterator(d);
+
+        /* Iterate this DB writing every entry */
+        while((de = dictNext(di)) != NULL) {
+            long long expire;
+            sds keystr = dictGetKey(de);
+            robj *key = createStringObject(keystr, sdslen(keystr));
+            robj *o = dictGetVal(de);
+
+            expire = getExpire(db,key);
+            entry = swapDataEntryCreate(SWAP_OUT, i, key, o, expire);
+            
+            /* Encodes an object into a buffer for storage. */
+            if ((buf = swapDataEncodeObject(entry)) == NULL) {
+                serverLog(LL_WARNING, "Swap data encode object failed, key:%s", (sds)entry->key->ptr);
+                goto cleanup;
+            }
+
+            /* Add the encoded object to the RocksDB. */
+            rocksdb_put_cf(server.swap->rocks->db,
+                           server.swap->rocks->wopts,
+                           server.swap->rocks->cf_handles[DB_CF(entry->dbid)],
+                           entry->key->ptr,
+                           sdslen(entry->key->ptr),
+                           buf,
+                           sdslen(buf),
+                           &err);
+            if (err != NULL) {
+                serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
+                goto cleanup;
+            }
+
+            /* Inserts the key into the Cuckoo filter. */
+            cuckooFilterInsert(&server.swap->cold_filter, entry->key->ptr, sdslen(entry->key->ptr));
+
+            /* Free the encoded buffer. */
+            sdsfree(buf); buf = NULL;
+            swapDataEntryRelease(entry); entry = NULL;
+        }
+        dictReleaseIterator(di); di = NULL;
+    }
+
+    /* Save the Cuckoo filter to RocksDB. */
+    name = sdsnew("cuckoo_filter");
+    cf_buf = cuckooFilterEncodeChunk(&server.swap->cold_filter, &len);
+    rocksdb_put_cf(server.swap->rocks->db,
+                   server.swap->rocks->wopts,
+                   server.swap->rocks->cf_handles[META_CF],
+                   name,
+                   sdslen(name),
+                   cf_buf,
+                   len,
+                   &err);
+    if (err != NULL) {
+        serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
+        goto cleanup;
+    }
+    sdsfree(name); name = NULL;
+    zfree(cf_buf); cf_buf = NULL;
+
+    /* Save the swap data version to RocksDB. */
+    name = sdsnew("swap_data_version");
+    swap_data_version = sdsfromlonglong(server.swap->swap_data_version);
+    rocksdb_put_cf(server.swap->rocks->db,
+                   server.swap->rocks->wopts,
+                   server.swap->rocks->cf_handles[META_CF],
+                   name,
+                   sdslen(name),
+                   swap_data_version,
+                   sdslen(swap_data_version),
+                   &err);
+    if (err != NULL) {
+        serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
+        goto cleanup;
+    }
+    sdsfree(name); name = NULL;
+    sdsfree(swap_data_version); swap_data_version = NULL;
+
+    return C_OK;
+
+cleanup:
+    if (di) dictReleaseIterator(di);
+    if (entry) swapDataEntryRelease(entry);
+    if (buf) sdsfree(buf);
+    if (cf_buf) zfree(cf_buf);
+    if (name) sdsfree(name);
+    if (swap_data_version) sdsfree(swap_data_version);
+    if (err) zlibc_free(err);
+    return C_ERR;
+}
+
 /* Check that memory usage is within the current "hotmemory" limit.  If over
  * "hotmemory", attempt to free memory by swapping data (if it's safe to do so).
  *
@@ -1244,7 +1374,7 @@ cant_free:
          * short wait here if such jobs exist, but don't wait long.  */
         mstime_t swap_latency;
         latencyStartMonitor(swap_latency);
-        while (swapFlushThread(threadId) == C_OK &&
+        while (swapFlushThread(threadId, 0) == C_OK &&
               elapsedUs(swapTimer) < swap_time_limit_us) {
             if (getSwapHotmemoryState(NULL,NULL,NULL,NULL) == C_OK) {
                 result = SWAP_OK;

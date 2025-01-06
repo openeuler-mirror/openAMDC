@@ -415,9 +415,10 @@ void cuckooFilterGetStat(const cuckooFilter *filter, cuckooFilterStat *stat) {
 /**
  * Encodes a cuckoo filter into a contiguous memory buffer
  */
-char *cuckooFiltrEncodeChunk(cuckooFilter *filter) {
+char *cuckooFilterEncodeChunk(cuckooFilter *filter, size_t *len) {
     size_t cuckooFilterTableSize = filter->numBuckets * filter->bucketSize * sizeof(CuckooFingerprint);
-    char *buf = CUCKOO_MALLOC(sizeof(cuckooFilterHeader) + filter->numFilters * cuckooFilterTableSize);
+    *len = sizeof(cuckooFilterHeader) + filter->numFilters * cuckooFilterTableSize;
+    char *buf = CUCKOO_MALLOC(*len);
 
     cuckooFilterHeader header = (cuckooFilterHeader) {
         .numBuckets = filter->numBuckets,
@@ -441,7 +442,7 @@ char *cuckooFiltrEncodeChunk(cuckooFilter *filter) {
 /**
  * Decodes a cuckoo filter from a contiguous memory buffer
  */
-cuckooFilter *cuckooFiltrDecodeChunk(const char *buf, size_t len) {
+cuckooFilter *cuckooFilterDecodeChunk(const char *buf, size_t len) {
     assert(len >= sizeof(cuckooFilterHeader));
     cuckooFilterHeader header;
     memcpy(&header, buf, sizeof(cuckooFilterHeader));
