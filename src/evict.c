@@ -328,9 +328,11 @@ size_t freeMemoryGetNotCountedMemory(void) {
         overhead += sdsalloc(server.aof_buf)+aofRewriteBufferSize();
     }
     if (server.swap_enabled) {
-        cuckooFilterStat status;
-        cuckooFilterGetStat(&server.swap->cold_filter, &status);
-        overhead += status.used_memory;
+        for (int i = 0; i < server.dbnum; i++) {
+            cuckooFilterStat status;
+            cuckooFilterGetStat(&server.swap->cold_filter[i], &status);
+            overhead += status.used_memory;
+        }
     }
     return overhead;
 }

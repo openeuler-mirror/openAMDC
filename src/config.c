@@ -2850,7 +2850,7 @@ standardConfig configs[] = {
     /* Unsigned Long Long configs */
     createULongLongConfig("maxmemory", NULL, MODIFIABLE_CONFIG, 0, ULLONG_MAX, server.maxmemory, 0, MEMORY_CONFIG, NULL, updateMaxmemory),
     createULongLongConfig("swap-hotmemory", NULL, MODIFIABLE_CONFIG, 0, ULLONG_MAX, server.swap_hotmemory, 0, MEMORY_CONFIG, NULL, updateSwapHotmemory),
-    createULongLongConfig("swap-cuckoofilter-size-for-level", NULL, IMMUTABLE_CONFIG, 0, ULLONG_MAX, server.swap_cuckoofilter_size_for_level, 64*1024*1024, MEMORY_CONFIG, NULL, NULL),
+    createULongLongConfig("swap-cuckoofilter-size-for-level", NULL, IMMUTABLE_CONFIG, 0, ULLONG_MAX, server.swap_cuckoofilter_size_for_level, 32*1024*1024, MEMORY_CONFIG, NULL, NULL),
     createULongLongConfig("rocksdb-max-total-wal-size", NULL, IMMUTABLE_CONFIG, 0, ULLONG_MAX, server.rocksdb_max_total_wal_size, 512*1024*1024, MEMORY_CONFIG, NULL, NULL),
     createULongLongConfig("rocksdb-min-blob-size", NULL, MODIFIABLE_CONFIG, 0, ULLONG_MAX, server.rocksdb_min_blob_size, 4096, MEMORY_CONFIG, NULL, updateRocksdbDataMinBlobSize),
     createULongLongConfig("rocksdb-blob-file-size", NULL, MODIFIABLE_CONFIG, 0, ULLONG_MAX, server.rocksdb_blob_file_size, 256*1024*1024, MEMORY_CONFIG, NULL, updateRocksdbDataBlobFileSize),

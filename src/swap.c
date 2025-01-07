@@ -543,7 +543,7 @@ static void swapDataEntryBatchFinished(swapDataEntryBatch *eb, int async) {
         /* Check if the entry's intention is SWAP_OUT. */
         if (entry->intention == SWAP_OUT) {
             /* Insert the key into the cold filter. */
-            if (cuckooFilterInsert(&server.swap->cold_filter,
+            if (cuckooFilterInsert(&server.swap->cold_filter[entry->dbid],
                                    entry->key->ptr, 
                                    sdslen(entry->key->ptr)) != CUCKOO_FILTER_INSERTED) {
                 serverLog(LL_WARNING, "Cuckoo filter insert failed, key:%s", (sds)entry->key->ptr);
@@ -790,13 +790,16 @@ void swapInit(void) {
     }
 
     /* Initialize the Cuckoo Filter and log a warning if initialization fails. */
-    if (cuckooFilterInit(&server.swap->cold_filter, 
-                         server.swap_cuckoofilter_size_for_level,
-                         server.swap_cuckoofilter_bucket_size,
-                         CF_DEFAULT_MAX_ITERATIONS,
-                         CF_DEFAULT_EXPANSION) == -1) {
-        serverLog(LL_WARNING, "Failed to initialize Cuckoo Filter");
-        exit(1);
+    server.swap->cold_filter = zmalloc(sizeof(cuckooFilter)*server.dbnum);
+    for (int i = 0; i < server.dbnum; ++i) {
+        if (cuckooFilterInit(&server.swap->cold_filter[i],
+                             server.swap_cuckoofilter_size_for_level,
+                             server.swap_cuckoofilter_bucket_size,
+                             CF_DEFAULT_MAX_ITERATIONS,
+                             CF_DEFAULT_EXPANSION, 1) == -1) {
+            serverLog(LL_WARNING, "Failed to initialize Cuckoo Filter");
+            exit(1);
+        }
     }
 
     /* Initialize swap data entry batches and pending entries lists for worker threads */
@@ -826,7 +829,9 @@ void swapRelease(void) {
     /* Release the swap pool. */
     swapPoolEntryRelease(server.swap->pool);
     /* Release the Cuckoo Filter. */
-    cuckooFilterFree(&server.swap->cold_filter);
+    for (int i = 0; i < server.dbnum; ++i)
+        cuckooFilterFree(&server.swap->cold_filter[i]);
+    zfree(server.swap->cold_filter);
     /* Close the RocksDB */
     rocksClose();
 }
@@ -1109,7 +1114,7 @@ int swapHotmemorySave(void) {
     char *cf_buf = NULL;
     char *err = NULL;
     swapDataEntry *entry = NULL;
-    sds name = NULL, swap_data_version = NULL;
+    sds name = NULL, swap_data_version = NULL, dbnum = NULL;
     dictEntry *de;
     dictIterator *di = NULL;
 
@@ -1151,7 +1156,7 @@ int swapHotmemorySave(void) {
             }
 
             /* Inserts the key into the Cuckoo filter. */
-            cuckooFilterInsert(&server.swap->cold_filter, entry->key->ptr, sdslen(entry->key->ptr));
+            cuckooFilterInsert(&server.swap->cold_filter[entry->dbid], entry->key->ptr, sdslen(entry->key->ptr));
 
             /* Free the encoded buffer. */
             sdsfree(buf); buf = NULL;
@@ -1160,23 +1165,47 @@ int swapHotmemorySave(void) {
         dictReleaseIterator(di); di = NULL;
     }
 
-    /* Save the Cuckoo filter to RocksDB. */
-    name = sdsnew("cuckoo_filter");
-    cf_buf = cuckooFilterEncodeChunk(&server.swap->cold_filter, &len);
+    /* Save the dbnum to RocksDB. */
+    name = sdsnew("dbnum");
+    dbnum = sdsfromlonglong(server.dbnum);
     rocksdb_put_cf(server.swap->rocks->db,
                    server.swap->rocks->wopts,
                    server.swap->rocks->cf_handles[META_CF],
                    name,
                    sdslen(name),
-                   cf_buf,
-                   len,
+                   dbnum,
+                   sdslen(dbnum),
                    &err);
     if (err != NULL) {
         serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
         goto cleanup;
     }
     sdsfree(name); name = NULL;
-    zfree(cf_buf); cf_buf = NULL;
+    sdsfree(dbnum); dbnum = NULL;
+
+    /* Save the Cuckoo filter to RocksDB. */
+    for (int i = 0; i < server.dbnum; i++) {
+        cuckooFilter *filter = &server.swap->cold_filter[i];
+        if (filter->numItems == 0) continue;
+
+        name = sdsnew("cuckoo_filter");
+        name = sdscatprintf(name, "#%d", i);
+        cf_buf = cuckooFilterEncodeChunk(filter, &len);
+        rocksdb_put_cf(server.swap->rocks->db,
+                       server.swap->rocks->wopts,
+                       server.swap->rocks->cf_handles[META_CF],
+                       name,
+                       sdslen(name),
+                       cf_buf,
+                       len,
+                       &err);
+        if (err != NULL) {
+            serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
+            goto cleanup;
+        }
+        sdsfree(name); name = NULL;
+        zfree(cf_buf); cf_buf = NULL;
+    }
 
     /* Save the swap data version to RocksDB. */
     name = sdsnew("swap_data_version");
@@ -1201,6 +1230,7 @@ int swapHotmemorySave(void) {
 cleanup:
     if (di) dictReleaseIterator(di);
     if (entry) swapDataEntryRelease(entry);
+    if (dbnum) sdsfree(dbnum);
     if (buf) sdsfree(buf);
     if (cf_buf) zfree(cf_buf);
     if (name) sdsfree(name);

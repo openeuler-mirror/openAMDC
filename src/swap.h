@@ -105,7 +105,7 @@ void swapThreadClose(void);
 typedef struct swapState {
     rocks *rocks; /* RocksDB data */
     swapThread *swap_threads;
-    cuckooFilter cold_filter;
+    cuckooFilter *cold_filter;
     swapDataEntryBatch *batch[MAX_THREAD_VAR];
     list *pending_entries[MAX_THREAD_VAR];
     swapPoolEntry *pool;

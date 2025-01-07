@@ -43,7 +43,7 @@ void cuckooFilterSetHashFunctionSeed(uint8_t *seed) {
 }
 
 int cuckooFilterInit(cuckooFilter *filter, uint64_t levelSize, uint16_t bucketSize,
-                      uint16_t maxIterations, uint16_t expansion) {
+                      uint16_t maxIterations, uint16_t expansion, int lazy) {
     uint64_t capacity = levelSize / sizeof(CuckooFingerprint);
     memset(filter, 0, sizeof(*filter));
     filter->expansion = getNextN2(expansion);
@@ -55,7 +55,7 @@ int cuckooFilterInit(cuckooFilter *filter, uint64_t levelSize, uint16_t bucketSi
     }
     assert(isPower2(filter->numBuckets));
 
-    if (cuckooFilterGrow(filter) != 0) {
+    if (!lazy && cuckooFilterGrow(filter) != 0) {
         return -1; // LCOV_EXCL_LINE memory failure
     }
     return 0;
@@ -245,11 +245,13 @@ static cuckooInsertStatus cuckooFilterInsertFP(cuckooFilter *filter, const looku
     }
 
     // No space. Time to evict!
-    cuckooInsertStatus status =
-        filterKOInsert(filter, &filter->tables[filter->numFilters - 1], params);
-    if (status == CUCKOO_FILTER_INSERTED) {
-        filter->numItems++;
-        return CUCKOO_FILTER_INSERTED;
+    if (filter->numFilters > 0) {
+        cuckooInsertStatus status =
+            filterKOInsert(filter, &filter->tables[filter->numFilters - 1], params);
+        if (status == CUCKOO_FILTER_INSERTED) {
+            filter->numItems++;
+            return CUCKOO_FILTER_INSERTED;
+        }
     }
 
     if (filter->expansion == 0) {
