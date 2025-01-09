@@ -119,6 +119,7 @@ robj *swapIn(robj* key, int dbid);
 void swapOut(robj* key, robj *val, int dbid);
 void swapDel(robj* key, int dbid);
 int swapFlushThread(int iel, int force);
+int swapHotMemoryLoad(void);
 int swapHotmemorySave(void);
 int performSwapData(void);
 int overSwapHotmemoryAfterAlloc(size_t moremem);

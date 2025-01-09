@@ -37,4 +37,4 @@ Makefile.dep
 .ccls-cache/*
 compile_commands.json
 openamdc.code-workspace
-rocksdb.data
+rocksdb.dir

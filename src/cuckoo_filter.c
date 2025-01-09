@@ -444,27 +444,28 @@ char *cuckooFilterEncodeChunk(cuckooFilter *filter, size_t *len) {
 /**
  * Decodes a cuckoo filter from a contiguous memory buffer
  */
-cuckooFilter *cuckooFilterDecodeChunk(const char *buf, size_t len) {
+cuckooFilter cuckooFilterDecodeChunk(const char *buf, size_t len) {
     assert(len >= sizeof(cuckooFilterHeader));
     cuckooFilterHeader header;
     memcpy(&header, buf, sizeof(cuckooFilterHeader));
 
-    cuckooFilter *filter = CUCKOO_MALLOC(sizeof(cuckooFilter));
-    filter->numBuckets = header.numBuckets;
-    filter->numItems = header.numItems;
-    filter->numDeletes = header.numDeletes;
-    filter->numFilters = header.numFilters;
-    filter->bucketSize = header.bucketSize;
-    filter->maxIterations = header.maxIterations;
-    filter->expansion = header.expansion;
-    filter->tables = CUCKOO_MALLOC(sizeof(cuckooFilterTable) * filter->numFilters);
+    cuckooFilter filter;
+    filter.numBuckets = header.numBuckets;
+    filter.numItems = header.numItems;
+    filter.numDeletes = header.numDeletes;
+    filter.numFilters = header.numFilters;
+    filter.bucketSize = header.bucketSize;
+    filter.maxIterations = header.maxIterations;
+    filter.expansion = header.expansion;
+    filter.tables = CUCKOO_MALLOC(sizeof(cuckooFilterTable) * filter.numFilters);
 
-    size_t cuckooFilterTableSize = filter->numBuckets * filter->bucketSize * sizeof(CuckooFingerprint);
-    for (uint16_t i = 0; i < filter->numFilters; i++) {
+    size_t cuckooFilterTableSize = filter.numBuckets * filter.bucketSize * sizeof(CuckooFingerprint);
+    for (uint16_t i = 0; i < filter.numFilters; i++) {
+        filter.tables->data = CUCKOO_MALLOC(cuckooFilterTableSize);
         size_t offset = sizeof(cuckooFilterHeader) + i * cuckooFilterTableSize;
-        cuckooFilterTable *table = filter->tables + i;
-        table->bucketSize = filter->bucketSize;
-        table->numBuckets = filter->numBuckets;
+        cuckooFilterTable *table = filter.tables + i;
+        table->bucketSize = filter.bucketSize;
+        table->numBuckets = filter.numBuckets;
         memcpy(table->data, buf + offset, cuckooFilterTableSize);
     }
 

@@ -385,6 +385,12 @@ void incrGblVersion(void) {
     atomicIncr(server.swap->swap_data_version, 1);
 }
 
+void setGblVersion(uint64_t version) {
+    if (!server.swap_enabled) return;
+
+    atomicSet(server.swap->swap_data_version, version);
+}
+
 uint64_t getGblVersion(void) {
     if (!server.swap_enabled) return OBJ_VERSION_INVALID;
 

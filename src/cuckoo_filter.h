@@ -89,7 +89,7 @@ uint64_t cuckooFilterCount(const cuckooFilter *filter, const char *key, size_t k
 void cuckooFilterCompact(cuckooFilter *filter, bool cont);
 void cuckooFilterGetStat(const cuckooFilter *filter, cuckooFilterStat *stat);
 char *cuckooFilterEncodeChunk(cuckooFilter *filter, size_t *len);
-cuckooFilter *cuckooFilterDecodeChunk(const char *buf, size_t len);
+cuckooFilter cuckooFilterDecodeChunk(const char *buf, size_t len);
 int cuckooFilterValidateIntegrity(const cuckooFilter *filter);
 void cuckooFilterSetHashFunctionSeed(uint8_t *seed);
 

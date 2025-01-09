@@ -1669,6 +1669,7 @@ struct redisServer {
     int swap_hotmemory_eviction_tenacity; /* Aggressiveness of swap processing */
     unsigned long long swap_cuckoofilter_size_for_level; /* Size of the cuckoo filter in bytes */
     int swap_cuckoofilter_bucket_size; /* Size of cuckoo filter bucket */
+    char *rocksdb_dir; /* Name of the rocksdb file dir */
     int rocksdb_max_background_jobs; /* Set the maximum number of concurrent background operations such as compaction and mergin */
     int rocksdb_max_background_compactions; /* The maximum number of concurrent compaction jobs in the background */
     int rocksdb_max_background_flushes; /* The maximum number of concurrent flush operations that RocksDB can execute in the background. */
@@ -2057,6 +2058,7 @@ void incrRefCount(robj *o);
 void setVersion(robj *o, uint64_t version);
 uint64_t getVersion(robj *o);
 void incrGblVersion(void);
+void setGblVersion(uint64_t version);
 uint64_t getGblVersion(void);
 robj *makeObjectShared(robj *o);
 robj *resetRefCount(robj *obj);
@@ -2159,6 +2161,8 @@ void loadingProgress(off_t pos);
 void stopLoading(int success);
 void startSaving(int rdbflags);
 void stopSaving(int success);
+void startLoadingRocksdb(size_t size);
+void stopLoadingRocksdb(int success);
 int allPersistenceDisabled(void);
 
 #define DISK_ERROR_TYPE_AOF 1       /* Don't accept writes: AOF errors. */

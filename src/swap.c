@@ -17,7 +17,7 @@
 #define KB 1024
 #define MB (1024 * 1024)
 
-#define ROCKSDB_DIR "rocksdb.data"
+#define ROCKSDB_DIR "rocksdb.dir"
 
 #define META_CF 0
 #define DB_CF(dbid) (dbid+1)
@@ -46,7 +46,7 @@ int rocksInit(void) {
 
 /* Opens or creates the RocksDB database. */
 int rocksOpen(struct rocks *rocks) {
-    char *errs = NULL;
+    char *err = NULL;
     int num_column_families = server.dbnum + 1;
     char **cf_names = zmalloc(sizeof(char *) * num_column_families);
     rocksdb_options_t **cf_opts = zmalloc(sizeof(rocksdb_options_t *) * num_column_families);
@@ -89,7 +89,7 @@ int rocksOpen(struct rocks *rocks) {
     /* Configure each column families. */
     for (int i = 0; i < num_column_families; i++) {
         /* Default column is used to store meta information. */
-        cf_names[i] = i == 0 ? sdsnew("default") : sdscatfmt(sdsempty(), "db%d", i-1);
+        cf_names[i] = i == 0 ? sdsnew("default") : sdscatfmt(sdsempty(), "db%i", i-1);
         cf_opts[i] = rocksdb_options_create_copy(rocks->db_opts);
         rocksdb_options_set_compression(cf_opts[i], server.rocksdb_compression);
         rocksdb_options_set_level0_slowdown_writes_trigger(cf_opts[i], server.rocksdb_level0_slowdown_writes_trigger);
@@ -118,11 +118,11 @@ int rocksOpen(struct rocks *rocks) {
     }
     
     /* Open the database. */
-    rocks->db = rocksdb_open_column_families(rocks->db_opts, ROCKSDB_DIR, num_column_families, (const char *const *)cf_names,
-                                             (const rocksdb_options_t *const *)cf_opts, rocks->cf_handles, &errs);
-    if (errs != NULL) {
-        serverLog(LL_WARNING, "Rocksdb open column families failed: %s", errs);
-        zlibc_free(errs);
+    rocks->db = rocksdb_open_column_families(rocks->db_opts, server.rocksdb_dir, num_column_families, (const char *const *)cf_names,
+                                             (const rocksdb_options_t *const *)cf_opts, rocks->cf_handles, &err);
+    if (err != NULL) {
+        serverLog(LL_WARNING, "Rocksdb open column families failed: %s", err);
+        zlibc_free(err);
         return C_ERR;
     }
     
@@ -1105,8 +1105,228 @@ static unsigned long swapTimeLimitUs(void) {
     return ULONG_MAX;   /* No limit to swap time */
 }
 
+/* Load hot data from RocksDB. */
+int swapHotMemoryLoad(void) {
+    if (!server.swap_enabled) return C_ERR;
+    if (!server.swap_hotmemory) return C_OK;
+
+    char *err = NULL;
+    int dbid, dist = 0, db = 0;
+    rocksdb_iterator_t *iter;
+    rocksdb_iterator_t **iterators = NULL;
+    long long dbnum, swap_data_version, keys_loaded = 0;
+    size_t delta, mem_reported, mem_used, mem_toload, mem_loaded = 0;
+
+    /* Allocate memory for iterators */
+    iterators = zmalloc(sizeof(rocksdb_iterator_t *) * server.dbnum);
+    rocksdb_create_iterators(server.swap->rocks->db,
+                             server.swap->rocks->ropts,
+                             server.swap->rocks->cf_handles,
+                             iterators,
+                             server.dbnum + 1,
+                             &err);
+    if (err != NULL) {
+        serverLog(LL_WARNING, "Rocksdb create iterators error, err: %s", err);
+        goto cleanup;
+    }
+
+    /* Process the current meta info. */
+    iter = iterators[META_CF];
+    for (rocksdb_iter_seek_to_first(iter);
+         rocksdb_iter_valid(iter);
+         rocksdb_iter_next(iter)) {
+        size_t klen, vlen;
+        char *key_buf = (char *)rocksdb_iter_key(iter, &klen);
+        char *val_buf = (char *)rocksdb_iter_value(iter, &vlen);
+        sds key = sdsnewlen(key_buf, klen);
+
+        if (val_buf == NULL) goto cleanup;
+
+        if (!strcmp(key, "dbnum")) {
+            /* Load the number of databases (dbnum) from RocksDB. */
+            /* Convert the value and check if the dbnum exceeds the configured maximum. */
+            sds val = sdsnewlen(val_buf, vlen);
+            if (string2ll(val, sdslen(val), &dbnum) == 0) goto cleanup;
+            if ((int)dbnum < server.dbnum) {
+                serverLog(LL_WARNING,
+                    "FATAL: Rocksdb was created with a openAMDC "
+                    "server configured to handle more than %d "
+                    "databases. Exiting\n", server.dbnum);
+                exit(1);
+            }
+            server.dbnum = (int)dbnum;
+            sdsfree(val);
+        } else if (!strcmp(key, "swap_data_version")) { 
+            /* Load the swap data version from RocksDB. */
+            /* Convert the value and set the swap data version. */
+            sds val = sdsnewlen(val_buf, vlen);
+            if (string2ll(val, sdslen(val), &swap_data_version) == 0) goto cleanup;
+            setGblVersion(swap_data_version);
+            sdsfree(val);
+        } else if (strstr(key, "cuckoo_filter")) {
+            /* Load the cuckoo filter from RocksDB for each database. */
+            int count;
+            long long dbid;
+            sds *argv = sdssplitlen(key, sdslen(key), "#", 1, &count);
+            if (argv && count == 2) {
+                if (string2ll(argv[1], sdslen(argv[1]), &dbid) == 0) {
+                    sdsfreesplitres(argv, count);
+                    goto cleanup;
+                }
+                /* Free the existing cuckoo filter. */
+                cuckooFilterFree(&server.swap->cold_filter[dbid]);
+                /* Decode and set the new cuckoo filter. */
+                server.swap->cold_filter[dbid] = cuckooFilterDecodeChunk(val_buf, vlen);
+                sdsfreesplitres(argv, count);
+            } else {
+                sdsfreesplitres(argv, count);
+                goto cleanup;
+            }
+        } else {
+            /* We ignore fields we don't understand. */
+            serverLog(LL_DEBUG,"Unrecognized rocksdb meta field: '%s'", key);
+        }
+
+        sdsfree(key);
+    }
+
+    /* Iterate over each database. */
+    for (int i = 0; i < server.dbnum; i++) {
+        iter = iterators[DB_CF(i)];
+        /* Move the iterator to the first key. */
+        rocksdb_iter_seek_to_first(iter);
+        /* If the iterator is valid, set no_empty to 1 (indicating the database is empty). */
+        db += rocksdb_iter_valid(iter) ? 1 : 0;
+    }
+
+    /* Determine the amount of memory to load. */
+    mem_toload = server.swap_hotmemory -
+                 (getSwapHotmemoryState(&mem_reported,
+                                        &mem_used,
+                                        NULL,
+                                        NULL) == C_OK ? mem_reported : mem_used);
+    /* Continue loading until the required memory is loaded. */
+    while(db && mem_loaded < mem_toload) {
+        dbid = (dist++) % server.dbnum; 
+        /* Get the iterator for the current database. */
+        iter = iterators[DB_CF(dbid)];
+
+        /* If the iterator is invalid, continue. */
+        if (!rocksdb_iter_valid(iter)) continue;
+
+        swapDataRetrieval *r;
+        long long expiretime, lfu_freq;
+        size_t klen, vlen;
+        char *key_buf = (char *)rocksdb_iter_key(iter, &klen);
+        char *val_buf = (char *)rocksdb_iter_value(iter, &vlen);
+        sds key = sdsnewlen(key_buf, klen);
+        robj keyobj, *o;
+        initStaticStringObject(keyobj, key);
+
+        /* Record the initial memory usage. */
+        delta = zmalloc_used_memory();
+
+        /* Decode the retrieved data， if decoding fails, free the allocated memory and return NULL. */
+        if ((r = swapDataDecodeObject(&keyobj, val_buf, vlen)) == NULL) { 
+            goto rerr;
+        } else {
+            o = r->val;
+            expiretime = r->expiretime;
+            lfu_freq = r->lfu_freq;
+            swapDataRetrievalRelease(r);
+        }
+
+        /* If the current server is the master and the object has expired, delete the object from
+            * RocksDB and free the object. */
+        if (iAmMaster() &&
+            expiretime != -1 && expiretime < mstime()) {
+            decrRefCount(o);
+            rocksdb_delete_cf(server.swap->rocks->db,
+                                server.swap->rocks->wopts,
+                                server.swap->rocks->cf_handles[DB_CF(dbid)],
+                                key,
+                                sdslen(key),
+                                &err);
+            if (err != NULL) {
+                serverLog(LL_WARNING, "Rocksdb delete key error, key:%s, err: %s", key, err);
+                goto rerr;
+            }
+            server.stat_swap_in_expired_keys_skipped++;
+        } else {
+            /* Add the new object in the hash table. */
+            int added = dbAddRDBLoad(server.db+dbid,key,o);
+            if (!added) {
+                serverLog(LL_WARNING,"Rocksdb has duplicated key '%s' in DB %d", key, dbid);
+                serverPanic("Duplicated key found in Rocksdb");
+            }
+
+            /* Set the expire time if needed. */
+            if (expiretime != -1) {
+                setExpire(NULL, server.db+dbid, &keyobj, expiretime);
+            }
+
+            /* Set usage information (for swap). */
+            objectSetLRUOrLFU(o, lfu_freq, -1, LRU_CLOCK(), 1000);
+
+            /* Delete the key from the cuckoo filter. */
+            cuckooFilterDelete(&server.swap->cold_filter[dbid], key, sdslen(key));
+        }
+
+        /* Calculate the memory used by the loaded object. */
+        delta = zmalloc_used_memory() - delta;
+
+        /* Calculate the number of intervals that have passed since the last
+            * event processing for both the current loaded memory (`mem_loaded`)
+            * and the updated loaded memory (`mem_loaded + delta`). If the updated
+            * loaded memory crosses into a new interval, it means enough memory has
+            * been loaded to warrant processing events. */
+        if (server.loading_process_events_interval_bytes &&
+            (mem_loaded + delta)/server.loading_process_events_interval_bytes >
+            mem_loaded/server.loading_process_events_interval_bytes ) {
+                /* Report loading progress. */
+                loadingProgress(delta);
+                /* Process events while blocked. */
+                processEventsWhileBlocked(threadId);
+                /* Process module loading progress event. */
+                processModuleLoadingProgressEvent(0);
+        }
+
+        /* Add the memory used by the loaded object to the total memory loaded. */
+        mem_loaded += delta;
+        /* Increment the count of keys loaded. */
+        keys_loaded++;
+
+        /* Move to the next item in the iterator. */
+        rocksdb_iter_next(iter);
+        
+        /* Update dbs count if the current database is empty. */
+        if (!rocksdb_iter_valid(iter)) db--;
+    }
+
+cleanup:
+    /* Free the iterators array. */
+    for (int i = 0; i < server.dbnum+1; i++) {
+        rocksdb_iterator_t *iter = iterators[i];
+        rocksdb_iter_destroy(iter);
+    }
+    zfree(iterators);
+    return C_OK;
+
+rerr:
+    if (iterators) {
+        /* Free the iterators array. */
+        for (int i = 0; i < server.dbnum+1; i++) {
+            rocksdb_iterator_t *iter = iterators[i];
+            rocksdb_iter_destroy(iter);
+        }
+        zfree(iterators);
+    }
+    return C_ERR;
+}
+
 /* Save hot data to RocksDB. */
 int swapHotmemorySave(void) {
+    if (!server.swap_enabled) return C_ERR;
     if (!server.swap_hotmemory) return C_OK;
     
     sds buf = NULL;
@@ -1237,6 +1457,35 @@ cleanup:
     if (swap_data_version) sdsfree(swap_data_version);
     if (err) zlibc_free(err);
     return C_ERR;
+}
+
+/* Mark that we are loading in the global state and setup the fields
+ * needed to provide loading stats. */
+void startLoadingRocksdb(size_t size) {
+    /* Load the DB */
+    server.loading = 1;
+    server.loading_start_time = time(NULL);
+    server.loading_loaded_bytes = 0;
+    server.loading_total_bytes = size;
+    blockingOperationStarts();
+
+    /* Fire the loading modules start event. */
+    moduleFireServerEvent(REDISMODULE_EVENT_LOADING,
+                          REDISMODULE_SUBEVENT_LOADING_ROCKSDB_START,
+                          NULL);
+}
+
+/* Loading finished */
+void stopLoadingRocksdb(int success) {
+    server.loading = 0;
+    blockingOperationEnds();
+
+    /* Fire the loading modules end event. */
+    moduleFireServerEvent(REDISMODULE_EVENT_LOADING,
+                          success?
+                          REDISMODULE_SUBEVENT_LOADING_ENDED:
+                          REDISMODULE_SUBEVENT_LOADING_FAILED,
+                          NULL);
 }
 
 /* Check that memory usage is within the current "hotmemory" limit.  If over
