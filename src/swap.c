@@ -907,6 +907,8 @@ robj *swapIn(robj *key, int dbid) {
             serverLog(LL_WARNING, "Rocksdb delete key error, key:%s, err: %s", (sds)key->ptr, err);
             return NULL;
         }
+        /* Remove the key from the cold filter. */
+        cuckooFilterDelete(&server.swap->cold_filter[dbid], key->ptr, sdslen(key->ptr));
         server.stat_swap_in_expired_keys_skipped++;
     } else {
         /* Add the new object in the hash table */
@@ -1118,7 +1120,7 @@ int swapHotMemoryLoad(void) {
     size_t delta, mem_reported, mem_used, mem_toload, mem_loaded = 0;
 
     /* Allocate memory for iterators */
-    iterators = zmalloc(sizeof(rocksdb_iterator_t *) * server.dbnum);
+    iterators = zcalloc(sizeof(rocksdb_iterator_t *) * server.dbnum);
     rocksdb_create_iterators(server.swap->rocks->db,
                              server.swap->rocks->ropts,
                              server.swap->rocks->cf_handles,
@@ -1179,6 +1181,7 @@ int swapHotMemoryLoad(void) {
                 server.swap->cold_filter[dbid] = cuckooFilterDecodeChunk(val_buf, vlen);
                 sdsfreesplitres(argv, count);
             } else {
+                serverLog(LL_WARNING, "Failed to decode cuckoo filter");
                 sdsfreesplitres(argv, count);
                 goto cleanup;
             }
@@ -1186,7 +1189,6 @@ int swapHotMemoryLoad(void) {
             /* We ignore fields we don't understand. */
             serverLog(LL_DEBUG,"Unrecognized rocksdb meta field: '%s'", key);
         }
-
         sdsfree(key);
     }
 
@@ -1228,7 +1230,7 @@ int swapHotMemoryLoad(void) {
 
         /* Decode the retrieved data， if decoding fails, free the allocated memory and return NULL. */
         if ((r = swapDataDecodeObject(&keyobj, val_buf, vlen)) == NULL) { 
-            goto rerr;
+            goto cleanup;
         } else {
             o = r->val;
             expiretime = r->expiretime;
@@ -1242,15 +1244,17 @@ int swapHotMemoryLoad(void) {
             expiretime != -1 && expiretime < mstime()) {
             decrRefCount(o);
             rocksdb_delete_cf(server.swap->rocks->db,
-                                server.swap->rocks->wopts,
-                                server.swap->rocks->cf_handles[DB_CF(dbid)],
-                                key,
-                                sdslen(key),
-                                &err);
+                              server.swap->rocks->wopts,
+                              server.swap->rocks->cf_handles[DB_CF(dbid)],
+                              key,
+                              sdslen(key),
+                              &err);
             if (err != NULL) {
                 serverLog(LL_WARNING, "Rocksdb delete key error, key:%s, err: %s", key, err);
-                goto rerr;
+                goto cleanup;
             }
+            /* Delete the key from the cold filter. */
+            cuckooFilterDelete(&server.swap->cold_filter[dbid], key, sdslen(key));
             server.stat_swap_in_expired_keys_skipped++;
         } else {
             /* Add the new object in the hash table. */
@@ -1276,19 +1280,19 @@ int swapHotMemoryLoad(void) {
         delta = zmalloc_used_memory() - delta;
 
         /* Calculate the number of intervals that have passed since the last
-            * event processing for both the current loaded memory (`mem_loaded`)
-            * and the updated loaded memory (`mem_loaded + delta`). If the updated
-            * loaded memory crosses into a new interval, it means enough memory has
-            * been loaded to warrant processing events. */
+         * event processing for both the current loaded memory (`mem_loaded`)
+         * and the updated loaded memory (`mem_loaded + delta`). If the updated
+         * loaded memory crosses into a new interval, it means enough memory has
+         * been loaded to warrant processing events. */
         if (server.loading_process_events_interval_bytes &&
             (mem_loaded + delta)/server.loading_process_events_interval_bytes >
             mem_loaded/server.loading_process_events_interval_bytes ) {
-                /* Report loading progress. */
-                loadingProgress(delta);
-                /* Process events while blocked. */
-                processEventsWhileBlocked(threadId);
-                /* Process module loading progress event. */
-                processModuleLoadingProgressEvent(0);
+            /* Report loading progress. */
+            loadingProgress(delta);
+            /* Process events while blocked. */
+            processEventsWhileBlocked(threadId);
+            /* Process module loading progress event. */
+            processModuleLoadingProgressEvent(0);
         }
 
         /* Add the memory used by the loaded object to the total memory loaded. */
@@ -1303,21 +1307,51 @@ int swapHotMemoryLoad(void) {
         if (!rocksdb_iter_valid(iter)) db--;
     }
 
-cleanup:
+    /* If the purge rocksdb after load option is enabled. */
+    if (server.swap_purge_rocksdb_after_load) {
+        /* Iterate over all databases specified by server.dbnum. */
+        for (int i = 0; i < server.dbnum; i++) {
+            dictIterator *di;
+            dictEntry *de;
+            redisDb *db = server.db+i;
+            dict *d = db->dict;
+            if (dictSize(d) == 0) continue;
+
+            /* Iterate over each entry in the dict. */
+            di = dictGetIterator(d);
+            while((de = dictNext(di)) != NULL) {
+                sds key = dictGetKey(de);
+                /* Delete the key from RocksDB column family corresponding to the current database. */
+                rocksdb_delete_cf(server.swap->rocks->db,
+                                  server.swap->rocks->wopts,
+                                  server.swap->rocks->cf_handles[DB_CF(i)],
+                                  key,
+                                  sdslen(key),
+                                  &err);
+                if (err != NULL) {
+                    serverLog(LL_WARNING, "Rocksdb delete key error, key:%s, err: %s", key, err);
+                    dictReleaseIterator(di);
+                    goto cleanup;
+                }
+            }
+            dictReleaseIterator(di);
+        }
+    }
+
     /* Free the iterators array. */
     for (int i = 0; i < server.dbnum+1; i++) {
-        rocksdb_iterator_t *iter = iterators[i];
+        iter = iterators[i];
         rocksdb_iter_destroy(iter);
     }
     zfree(iterators);
     return C_OK;
 
-rerr:
+cleanup:
     if (iterators) {
         /* Free the iterators array. */
         for (int i = 0; i < server.dbnum+1; i++) {
-            rocksdb_iterator_t *iter = iterators[i];
-            rocksdb_iter_destroy(iter);
+            iter = iterators[i];
+            if (iter) rocksdb_iter_destroy(iter);
         }
         zfree(iterators);
     }

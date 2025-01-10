@@ -1669,6 +1669,7 @@ struct redisServer {
     int swap_hotmemory_eviction_tenacity; /* Aggressiveness of swap processing */
     unsigned long long swap_cuckoofilter_size_for_level; /* Size of the cuckoo filter in bytes */
     int swap_cuckoofilter_bucket_size; /* Size of cuckoo filter bucket */
+    int swap_purge_rocksdb_after_load; /* Purge rocksdb after load */
     char *rocksdb_dir; /* Name of the rocksdb file dir */
     int rocksdb_max_background_jobs; /* Set the maximum number of concurrent background operations such as compaction and mergin */
     int rocksdb_max_background_compactions; /* The maximum number of concurrent compaction jobs in the background */
