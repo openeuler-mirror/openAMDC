@@ -244,6 +244,9 @@ static int swapMoveKeyOutOfMemory(swapDataEntry *entry, int async) {
         }
     }
 
+    /* Increment the cold data size in the database. */
+    server.db[entry->dbid].cold_data_size++;
+
     /* If there are any expired keys in the database, remove this key from the expires dictionary. */
     if (dictSize(server.db[entry->dbid].expires) > 0)
         dictDelete(server.db[entry->dbid].expires,entry->key->ptr);
@@ -909,6 +912,7 @@ robj *swapIn(robj *key, int dbid) {
         }
         /* Remove the key from the cold filter. */
         cuckooFilterDelete(&server.swap->cold_filter[dbid], key->ptr, sdslen(key->ptr));
+        server.db[dbid].cold_data_size--;
         server.stat_swap_in_expired_keys_skipped++;
     } else {
         /* Add the new object in the hash table */
@@ -1230,6 +1234,7 @@ int swapHotMemoryLoad(void) {
 
         /* Decode the retrieved data， if decoding fails, free the allocated memory and return NULL. */
         if ((r = swapDataDecodeObject(&keyobj, val_buf, vlen)) == NULL) { 
+            sdsfree(key);
             goto cleanup;
         } else {
             o = r->val;
@@ -1251,10 +1256,12 @@ int swapHotMemoryLoad(void) {
                               &err);
             if (err != NULL) {
                 serverLog(LL_WARNING, "Rocksdb delete key error, key:%s, err: %s", key, err);
+                sdsfree(key);
                 goto cleanup;
             }
             /* Delete the key from the cold filter. */
             cuckooFilterDelete(&server.swap->cold_filter[dbid], key, sdslen(key));
+            server.db[dbid].cold_data_size--;
             server.stat_swap_in_expired_keys_skipped++;
         } else {
             /* Add the new object in the hash table. */
@@ -1274,6 +1281,7 @@ int swapHotMemoryLoad(void) {
 
             /* Delete the key from the cuckoo filter. */
             cuckooFilterDelete(&server.swap->cold_filter[dbid], key, sdslen(key));
+            server.db[dbid].cold_data_size--;
         }
 
         /* Calculate the memory used by the loaded object. */
@@ -1305,6 +1313,8 @@ int swapHotMemoryLoad(void) {
         
         /* Update dbs count if the current database is empty. */
         if (!rocksdb_iter_valid(iter)) db--;
+
+        sdsfree(key);
     }
 
     /* If the purge rocksdb after load option is enabled. */
@@ -1411,6 +1421,7 @@ int swapHotmemorySave(void) {
 
             /* Inserts the key into the Cuckoo filter. */
             cuckooFilterInsert(&server.swap->cold_filter[entry->dbid], entry->key->ptr, sdslen(entry->key->ptr));
+            server.db[entry->dbid].cold_data_size++;
 
             /* Free the encoded buffer. */
             sdsfree(buf); buf = NULL;
@@ -1439,12 +1450,12 @@ int swapHotmemorySave(void) {
 
     /* Save the Cuckoo filter to RocksDB. */
     for (int i = 0; i < server.dbnum; i++) {
-        cuckooFilter *filter = &server.swap->cold_filter[i];
-        if (filter->numItems == 0) continue;
+        redisDb *db = server.db+i;
+        if (db->cold_data_size == 0) continue;
 
         name = sdsnew("cuckoo_filter");
         name = sdscatprintf(name, "#%d", i);
-        cf_buf = cuckooFilterEncodeChunk(filter, &len);
+        cf_buf = cuckooFilterEncodeChunk(&server.swap->cold_filter[i], &len);
         rocksdb_put_cf(server.swap->rocks->db,
                        server.swap->rocks->wopts,
                        server.swap->rocks->cf_handles[META_CF],

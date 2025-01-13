@@ -722,6 +722,7 @@ typedef struct redisDb {
     long long avg_ttl;          /* Average TTL, just for stats */
     unsigned long expires_cursor; /* Cursor of the active expire cycle. */
     list *defrag_later;         /* List of key names to attempt to defrag one by one, gradually. */
+    size_t cold_data_size;      /* Cold data size (keys not in memory) */
 } redisDb;
 
 /* Declare database backup that include openAMDC main DBs and slots to keys map.

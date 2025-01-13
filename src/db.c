@@ -72,6 +72,7 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
 
             /* Remove the key from the cold filter. */
             cuckooFilterDelete(&server.swap->cold_filter[db->id], key->ptr, sdslen(key->ptr));
+            db->cold_data_size--;
 
             /* Update the access time for the ageing algorithm.
              * Don't do it if we have a saving child, as this will trigger
@@ -568,7 +569,7 @@ long long dbTotalServerKeyCount() {
     long long total = 0;
     int j;
     for (j = 0; j < server.dbnum; j++) {
-        total += dictSize(server.db[j].dict);
+        total += dictSize(server.db[j].dict) + server.db[j].cold_data_size;
     }
     return total;
 }
@@ -1042,7 +1043,7 @@ void scanCommand(client *c) {
 }
 
 void dbsizeCommand(client *c) {
-    addReplyLongLong(c,dictSize(c->db->dict));
+    addReplyLongLong(c,dictSize(c->db->dict)+c->db->cold_data_size);
 }
 
 void lastsaveCommand(client *c) {

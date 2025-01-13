@@ -2185,13 +2185,14 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     if (server.verbosity <= LL_VERBOSE) {
         run_with_period(5000) {
             for (j = 0; j < server.dbnum; j++) {
-                long long size, used, vkeys;
+                long long hotkeys, coldkeys, allkeys, vkeys;
 
-                size = dictSlots(server.db[j].dict);
-                used = dictSize(server.db[j].dict);
+                hotkeys = dictSize(server.db[j].dict);
+                coldkeys = server.db[j].cold_data_size;
+                allkeys = hotkeys + coldkeys;
                 vkeys = dictSize(server.db[j].expires);
-                if (used || vkeys) {
-                    serverLog(LL_VERBOSE,"DB %d: %lld keys (%lld volatile) in %lld slots HT.",j,used,vkeys,size);
+                if (hotkeys || coldkeys || vkeys) {
+                    serverLog(LL_VERBOSE,"DB %d: %lld keys (%lld volatile), %lld hot keys, %lld cold keys.",j,allkeys,vkeys,hotkeys,coldkeys);
                 }
             }
         }
@@ -3409,6 +3410,7 @@ void initServer(void) {
         server.db[j].avg_ttl = 0;
         server.db[j].defrag_later = listCreate();
         listSetFreeMethod(server.db[j].defrag_later,(void (*)(void*))sdsfree);
+        server.db[j].cold_data_size = 0;
     }
 
     evictionPoolAlloc(); /* Initialize the LRU keys pool. */
@@ -5606,6 +5608,7 @@ sds genRedisInfoString(const char *section) {
             long long keys, vkeys;
 
             keys = dictSize(server.db[j].dict);
+            if (server.swap_enabled) keys += server.db[j].cold_data_size;
             vkeys = dictSize(server.db[j].expires);
             if (keys || vkeys) {
                 info = sdscatprintf(info,
