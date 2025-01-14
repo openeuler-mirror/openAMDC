@@ -1114,14 +1114,14 @@ static unsigned long swapTimeLimitUs(void) {
 /* Load hot data from RocksDB. */
 int swapHotMemoryLoad(void) {
     if (!server.swap_enabled) return C_ERR;
-    if (!server.swap_hotmemory) return C_OK;
 
     char *err = NULL;
     int dbid, dist = 0, db = 0;
     rocksdb_iterator_t *iter;
     rocksdb_iterator_t **iterators = NULL;
-    long long dbnum, swap_data_version, keys_loaded = 0;
-    size_t delta, mem_reported, mem_used, mem_toload, mem_loaded = 0;
+    long long dbnum, cold_data_size, swap_data_version, keys_loaded = 0;
+    long long delta, mem_toload, mem_loaded = 0;
+    size_t mem_reported, mem_used;
 
     /* Allocate memory for iterators */
     iterators = zcalloc(sizeof(rocksdb_iterator_t *) * server.dbnum);
@@ -1144,15 +1144,14 @@ int swapHotMemoryLoad(void) {
         size_t klen, vlen;
         char *key_buf = (char *)rocksdb_iter_key(iter, &klen);
         char *val_buf = (char *)rocksdb_iter_value(iter, &vlen);
-        sds key = sdsnewlen(key_buf, klen);
 
         if (val_buf == NULL) goto cleanup;
-
-        if (!strcmp(key, "dbnum")) {
+        
+        if (!strncmp(key_buf, "dbnum", 5)) {
             /* Load the number of databases (dbnum) from RocksDB. */
             /* Convert the value and check if the dbnum exceeds the configured maximum. */
-            sds val = sdsnewlen(val_buf, vlen);
-            if (string2ll(val, sdslen(val), &dbnum) == 0) goto cleanup;
+            if (string2ll(val_buf, vlen, &dbnum) == 0) goto cleanup;
+            
             if ((int)dbnum < server.dbnum) {
                 serverLog(LL_WARNING,
                     "FATAL: Rocksdb was created with a openAMDC "
@@ -1161,28 +1160,47 @@ int swapHotMemoryLoad(void) {
                 exit(1);
             }
             server.dbnum = (int)dbnum;
-            sdsfree(val);
-        } else if (!strcmp(key, "swap_data_version")) { 
+        } else if (!strncmp(key_buf, "swap_data_version", 17)) { 
             /* Load the swap data version from RocksDB. */
             /* Convert the value and set the swap data version. */
-            sds val = sdsnewlen(val_buf, vlen);
-            if (string2ll(val, sdslen(val), &swap_data_version) == 0) goto cleanup;
+            if (string2ll(val_buf, vlen, &swap_data_version) == 0) goto cleanup;
             setGblVersion(swap_data_version);
-            sdsfree(val);
-        } else if (strstr(key, "cuckoo_filter")) {
+        } else if (strstr(key_buf, "cuckoo_filter")) {
             /* Load the cuckoo filter from RocksDB for each database. */
             int count;
-            long long dbid;
-            sds *argv = sdssplitlen(key, sdslen(key), "#", 1, &count);
+            long long db;
+            sds *argv = sdssplitlen(key_buf, klen, "#", 1, &count);
             if (argv && count == 2) {
-                if (string2ll(argv[1], sdslen(argv[1]), &dbid) == 0) {
+                if (string2ll(argv[1], sdslen(argv[1]), &db) == 0) {
                     sdsfreesplitres(argv, count);
                     goto cleanup;
                 }
                 /* Free the existing cuckoo filter. */
-                cuckooFilterFree(&server.swap->cold_filter[dbid]);
+                cuckooFilterFree(&server.swap->cold_filter[db]);
                 /* Decode and set the new cuckoo filter. */
-                server.swap->cold_filter[dbid] = cuckooFilterDecodeChunk(val_buf, vlen);
+                server.swap->cold_filter[db] = cuckooFilterDecodeChunk(val_buf, vlen);
+                sdsfreesplitres(argv, count);
+            } else {
+                serverLog(LL_WARNING, "Failed to decode cuckoo filter");
+                sdsfreesplitres(argv, count);
+                goto cleanup;
+            }
+        } else if (strstr(key_buf, "cold_data_size")) {
+            /* Load the cold data size from RocksDB for each database. */
+            int count;
+            long long db;
+            sds *argv = sdssplitlen(key_buf, klen, "#", 1, &count);
+            if (argv && count == 2) {
+                if (string2ll(argv[1], sdslen(argv[1]), &db) == 0) {
+                    sdsfreesplitres(argv, count);
+                    goto cleanup;
+                }
+                if (string2ll(val_buf, vlen, &cold_data_size) == 0) {
+                    sdsfreesplitres(argv, count);
+                    goto cleanup;
+                }
+                /* Set the cold data size. */
+                server.db[db].cold_data_size = cold_data_size;
                 sdsfreesplitres(argv, count);
             } else {
                 serverLog(LL_WARNING, "Failed to decode cuckoo filter");
@@ -1191,9 +1209,8 @@ int swapHotMemoryLoad(void) {
             }
         } else {
             /* We ignore fields we don't understand. */
-            serverLog(LL_DEBUG,"Unrecognized rocksdb meta field: '%s'", key);
+            serverLog(LL_DEBUG,"Unrecognized rocksdb meta field");
         }
-        sdsfree(key);
     }
 
     /* Iterate over each database. */
@@ -1244,7 +1261,7 @@ int swapHotMemoryLoad(void) {
         }
 
         /* If the current server is the master and the object has expired, delete the object from
-            * RocksDB and free the object. */
+         * RocksDB and free the object. */
         if (iAmMaster() &&
             expiretime != -1 && expiretime < mstime()) {
             decrRefCount(o);
@@ -1293,8 +1310,8 @@ int swapHotMemoryLoad(void) {
          * loaded memory crosses into a new interval, it means enough memory has
          * been loaded to warrant processing events. */
         if (server.loading_process_events_interval_bytes &&
-            (mem_loaded + delta)/server.loading_process_events_interval_bytes >
-            mem_loaded/server.loading_process_events_interval_bytes ) {
+            ((size_t)(mem_loaded + delta))/server.loading_process_events_interval_bytes >
+            (size_t)mem_loaded/server.loading_process_events_interval_bytes) {
             /* Report loading progress. */
             loadingProgress(delta);
             /* Process events while blocked. */
@@ -1313,8 +1330,6 @@ int swapHotMemoryLoad(void) {
         
         /* Update dbs count if the current database is empty. */
         if (!rocksdb_iter_valid(iter)) db--;
-
-        sdsfree(key);
     }
 
     /* If the purge rocksdb after load option is enabled. */
@@ -1371,14 +1386,16 @@ cleanup:
 /* Save hot data to RocksDB. */
 int swapHotmemorySave(void) {
     if (!server.swap_enabled) return C_ERR;
-    if (!server.swap_hotmemory) return C_OK;
     
     sds buf = NULL;
     size_t len;
     char *cf_buf = NULL;
     char *err = NULL;
     swapDataEntry *entry = NULL;
-    sds name = NULL, swap_data_version = NULL, dbnum = NULL;
+    sds name = NULL;
+    sds cold_data_size = NULL;
+    sds swap_data_version = NULL;
+    sds dbnum = NULL;
     dictEntry *de;
     dictIterator *di = NULL;
 
@@ -1448,11 +1465,31 @@ int swapHotmemorySave(void) {
     sdsfree(name); name = NULL;
     sdsfree(dbnum); dbnum = NULL;
 
-    /* Save the Cuckoo filter to RocksDB. */
+    /* Iterate over each database. */
     for (int i = 0; i < server.dbnum; i++) {
         redisDb *db = server.db+i;
         if (db->cold_data_size == 0) continue;
 
+        /* Save the cold data size to RocksDB. */
+        name = sdsnew("cold_data_size");
+        name = sdscatprintf(name, "#%d", i);
+        cold_data_size = sdsfromlonglong(db->cold_data_size);
+        rocksdb_put_cf(server.swap->rocks->db,
+                    server.swap->rocks->wopts,
+                    server.swap->rocks->cf_handles[META_CF],
+                    name,
+                    sdslen(name),
+                    cold_data_size,
+                    sdslen(cold_data_size),
+                    &err);
+        if (err != NULL) {
+            serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
+            goto cleanup;
+        }
+        sdsfree(name); name = NULL;
+        sdsfree(cold_data_size); cold_data_size = NULL;
+
+        /* Save the cuckoo filter to RocksDB. */
         name = sdsnew("cuckoo_filter");
         name = sdscatprintf(name, "#%d", i);
         cf_buf = cuckooFilterEncodeChunk(&server.swap->cold_filter[i], &len);
@@ -1499,6 +1536,7 @@ cleanup:
     if (buf) sdsfree(buf);
     if (cf_buf) zfree(cf_buf);
     if (name) sdsfree(name);
+    if (cold_data_size) sdsfree(cold_data_size);
     if (swap_data_version) sdsfree(swap_data_version);
     if (err) zlibc_free(err);
     return C_ERR;
@@ -1714,6 +1752,111 @@ cant_free:
     latencyAddSampleIfNeeded("swap-cycle",latency);
     server.stat_swap_out_keys_total += keys_swapped;
     return result;
+}
+
+/* Start generating an RDB snapshot for the swap process. */
+void swapStartGenerateRDB(void) {
+    if (!server.swap_enabled) return;
+
+    /* Create a snapshot from the RocksDB database associated with the swap. */
+    server.swap->rocks->snapshot = (rocksdb_snapshot_t *)rocksdb_create_snapshot(server.swap->rocks->db);
+    /* Set the created snapshot to the read options for consistent reads. */
+    rocksdb_readoptions_set_snapshot(server.swap->rocks->ropts, server.swap->rocks->snapshot);
+}
+
+/* Iterates over the RocksDB cold data to generate an RDB or AOF file. */
+int swapIterateGenerateRDB(rio *rdb, int rdbflags, int dbid, long key_count, size_t processed, long long info_updated_time) {
+    if (!server.swap_enabled) return C_OK;
+
+    swapDataRetrieval *r;
+    char *pname = (rdbflags & RDBFLAGS_AOF_PREAMBLE) ? "AOF rewrite" :  "RDB";
+    /* Create an iterator for the specified column family in the RocksDB database. */
+    rocksdb_iterator_t *iter_snapshot =
+        rocksdb_create_iterator_cf(server.swap->rocks->db,
+                                   server.swap->rocks->ropts,
+                                   server.swap->rocks->cf_handles[DB_CF(dbid)]);
+    /* Iterate over all key-value pairs in the column family. */
+    for (rocksdb_iter_seek_to_first(iter_snapshot);
+         rocksdb_iter_valid(iter_snapshot);
+         rocksdb_iter_next(iter_snapshot)) {
+        robj keyobj, *o;
+        long long expiretime, lfu_freq;
+        size_t klen, vlen;
+        /* Get the key and value from the iterator. */
+        char *key_buf = (char *)rocksdb_iter_key(iter_snapshot, &klen);
+        char *val_buf = (char *)rocksdb_iter_value(iter_snapshot, &vlen);
+        sds key = sdsnewlen(key_buf, klen);
+        initStaticStringObject(keyobj, key);
+        
+        /* Check if the key is present in the Cuckoo filter. */
+        if (!cuckooFilterContains(&server.swap->cold_filter[dbid], key, sdslen(key))) {
+            sdsfree(key);
+            continue;
+        }
+
+        /* Decode the retrieved data， if decoding fails, free the allocated memory and return NULL. */
+        if ((r = swapDataDecodeObject(&keyobj, val_buf, vlen)) == NULL) { 
+            sdsfree(key);
+            goto werr;
+        } else {
+            o = r->val;
+            expiretime = r->expiretime;
+            lfu_freq = r->lfu_freq;
+            swapDataRetrievalRelease(r);
+        }
+
+        /* Set usage information (for swap). */
+        objectSetLRUOrLFU(o, lfu_freq, -1, LRU_CLOCK(), 1000);
+
+        if (rdbSaveKeyValuePair(rdb, &keyobj, o, expiretime) == -1) {
+            sdsfree(key);
+            goto werr;
+        }
+
+        /* When this RDB is produced as part of an AOF rewrite, move
+         * accumulated diff from parent to child while rewriting in
+         * order to have a smaller final write. */
+        if (rdbflags & RDBFLAGS_AOF_PREAMBLE &&
+            rdb->processed_bytes > processed+AOF_READ_DIFF_INTERVAL_BYTES)
+        {
+            processed = rdb->processed_bytes;
+            aofReadDiffFromParent();
+        }
+
+        /* Update child info every 1 second (approximately).
+         * in order to avoid calling mstime() on each iteration, we will
+         * check the diff every 1024 keys */
+        if ((key_count++ & 1023) == 0) {
+            long long now = mstime();
+            if (now - info_updated_time >= 1000) {
+                sendChildInfo(CHILD_INFO_TYPE_CURRENT_INFO, key_count, pname);
+                info_updated_time = now;
+            }
+        }
+        sdsfree(key);
+    }
+    /* Destroy the iterator. */
+    rocksdb_iter_destroy(iter_snapshot);
+    iter_snapshot = NULL;
+    return C_OK;
+
+werr:
+    /* If an error occurs, destroy the iterator and return an error. */
+    if (iter_snapshot)
+        rocksdb_iter_destroy(iter_snapshot);
+    return C_ERR;
+}
+
+/* Stops the RDB generation process by releasing the RocksDB snapshot. */
+void swapStopGenerateRDB(void) {
+    if (!server.swap_enabled) return;
+
+    /* Release the RocksDB snapshot. */
+    rocksdb_release_snapshot(server.swap->rocks->db, server.swap->rocks->snapshot);
+    /* Reset the snapshot in the read options. */
+    rocksdb_readoptions_set_snapshot(server.swap->rocks->ropts, NULL);
+    /* Set the snapshot pointer to NULL. */
+    server.swap->rocks->snapshot = NULL;
 }
 
 /* Process pending swap data entries for a specific thread. */

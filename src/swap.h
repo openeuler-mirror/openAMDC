@@ -123,6 +123,9 @@ int swapHotMemoryLoad(void);
 int swapHotmemorySave(void);
 int performSwapData(void);
 int overSwapHotmemoryAfterAlloc(size_t moremem);
+void swapStartGenerateRDB(void);
+int swapIterateGenerateRDB(rio *rdb, int rdbflags, int dbid, long key_count, size_t processed, long long info_updated_time);
+void swapStopGenerateRDB(void);
 void swapProcessPendingEntries(int iel);
 
 #endif

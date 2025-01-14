@@ -6255,7 +6255,7 @@ void loadDataFromDisk(void) {
         retval = swapHotMemoryLoad();
         stopLoadingRocksdb(retval == C_OK);
         if (retval == C_OK) {
-            serverLog(LL_NOTICE, "DB loaded from rocksdb: %.3f seconds",(float)(ustime()-start)/1000000);
+            serverLog(LL_NOTICE, "DB loaded from rocksdb: %.3f seconds", (float)(ustime()-start)/1000000);
         } else {
             serverLog(LL_WARNING, "Fatal error loading the rocksdb data. Exiting.");
             rocksClose();

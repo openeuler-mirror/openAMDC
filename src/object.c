@@ -1242,7 +1242,9 @@ sds getMemoryDoctorReport(void) {
  * Either or both of them may be <0, in that case, nothing is set. */
 int objectSetLRUOrLFU(robj *val, long long lfu_freq, long long lru_idle,
                        long long lru_clock, int lru_multiplier) {
-    if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
+    if ((server.maxmemory_policy & MAXMEMORY_FLAG_LFU) ||
+        (server.swap_enabled &&
+        (server.swap->hotmemory_policy == SWAP_HOTMEMORY_FLAG_LFU))) {
         if (lfu_freq >= 0) {
             serverAssert(lfu_freq <= 255);
             val->lru = (LFUGetTimeInMinutes()<<8) | lfu_freq;

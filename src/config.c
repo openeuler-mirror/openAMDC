@@ -2746,7 +2746,7 @@ standardConfig configs[] = {
     createBoolConfig("cluster-allow-replica-migration", NULL, MODIFIABLE_CONFIG, server.cluster_allow_replica_migration, 1, NULL, NULL),
     createBoolConfig("replica-announced", NULL, MODIFIABLE_CONFIG, server.replica_announced, 1, NULL, NULL),
     createBoolConfig("swap-enabled", NULL, IMMUTABLE_CONFIG, server.swap_enabled, 0, NULL, NULL),
-    createBoolConfig("swap-purge-rocksdb-after-load", NULL, MODIFIABLE_CONFIG, server.swap_purge_rocksdb_after_load, 1, NULL, NULL),
+    createBoolConfig("swap-purge-rocksdb-after-load", NULL, MODIFIABLE_CONFIG, server.swap_purge_rocksdb_after_load, 0, NULL, NULL),
     createBoolConfig("rocksdb-enable-pipelined-write", NULL, IMMUTABLE_CONFIG, server.rocksdb_enable_pipelined_write, 1, NULL, NULL),
     createBoolConfig("rocksdb-disable-auto-compactions", NULL, MODIFIABLE_CONFIG, server.rocksdb_disable_auto_compactions, 0, NULL, updateRocksdbDataDisableAutoCompactions),
     createBoolConfig("rocksdb-enable-blob-files", NULL, MODIFIABLE_CONFIG, server.rocksdb_enable_blob_files, 0, NULL, updateRocksdbDataEnableBlobFiles),

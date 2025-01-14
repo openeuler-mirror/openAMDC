@@ -15,6 +15,7 @@
 #include "zipmap.h"
 #include "endianconv.h"
 #include "stream.h"
+#include "swap.h"
 
 #include <math.h>
 #include <fcntl.h>
@@ -1215,6 +1216,7 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     long key_count = 0;
     long long info_updated_time = 0;
     char *pname = (rdbflags & RDBFLAGS_AOF_PREAMBLE) ? "AOF rewrite" :  "RDB";
+    if (server.swap_enabled) swapStartGenerateRDB();
 
     if (server.rdb_checksum)
         rdb->update_cksum = rioGenericUpdateChecksum;
@@ -1225,18 +1227,17 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
 
     for (j = 0; j < server.dbnum; j++) {
         redisDb *db = server.db+j;
-        dict *d = db->dict;
-        if (dictSize(d) == 0) continue;
-        di = dictGetSafeIterator(d);
+        size_t expires_size, db_size = dictSize(db->dict);
+        if (server.swap_enabled) db_size += db->cold_data_size;
+        if (db_size == 0) continue;
+        expires_size = dictSize(db->expires);
+        di = dictGetSafeIterator(db->dict);
 
         /* Write the SELECT DB opcode */
         if (rdbSaveType(rdb,RDB_OPCODE_SELECTDB) == -1) goto werr;
         if (rdbSaveLen(rdb,j) == -1) goto werr;
 
         /* Write the RESIZE DB opcode. */
-        uint64_t db_size, expires_size;
-        db_size = dictSize(db->dict);
-        expires_size = dictSize(db->expires);
         if (rdbSaveType(rdb,RDB_OPCODE_RESIZEDB) == -1) goto werr;
         if (rdbSaveLen(rdb,db_size) == -1) goto werr;
         if (rdbSaveLen(rdb,expires_size) == -1) goto werr;
@@ -1274,6 +1275,13 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
         }
         dictReleaseIterator(di);
         di = NULL; /* So that we don't release it again on error. */
+
+        /* If swap functionality is enabled. */
+        if (server.swap_enabled) {
+            /* Perform swap operation to write data into the RDB file. */
+            if (swapIterateGenerateRDB(rdb, rdbflags, j, key_count, processed, info_updated_time) == C_ERR)
+                goto werr;
+        }
     }
 
     /* If we are storing the replication information on disk, persist
@@ -1301,11 +1309,13 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     cksum = rdb->cksum;
     memrev64ifbe(&cksum);
     if (rioWrite(rdb,&cksum,8) == 0) goto werr;
+    if (server.swap_enabled) swapStopGenerateRDB();
     return C_OK;
 
 werr:
     if (error) *error = errno;
     if (di) dictReleaseIterator(di);
+    if (server.swap_enabled) swapStopGenerateRDB();
     return C_ERR;
 }
 

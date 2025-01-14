@@ -38,3 +38,4 @@ Makefile.dep
 compile_commands.json
 openamdc.code-workspace
 rocksdb.dir
+temp-*.rdb
