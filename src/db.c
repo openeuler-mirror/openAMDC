@@ -411,6 +411,26 @@ long long emptyDbStructure(redisDb *dbarray, int dbnum, int async,
             dictEmpty(dbarray[j].dict,callback);
             dictEmpty(dbarray[j].expires,callback);
         }
+
+        if (server.swap_enabled) {
+            char *err = NULL;
+            rocksdb_drop_column_family(server.swap->rocks->db, server.swap->rocks->cf_handles[DB_CF(j)], &err);
+            if (err != NULL) {
+                serverLog(LL_WARNING, "Failed to drop column family: %s", err);
+                zlibc_free(err);
+                return -1;
+            }
+            removed += dbarray[j].cold_data_size;
+
+            cuckooFilterFree(&server.swap->cold_filter[j]);
+            cuckooFilterInit(&server.swap->cold_filter[j],
+                             server.swap_cuckoofilter_size_for_level,
+                             server.swap_cuckoofilter_bucket_size,
+                             CF_DEFAULT_MAX_ITERATIONS,
+                             CF_DEFAULT_EXPANSION, 1);
+            dbarray[j].cold_data_size = 0;
+        }
+
         /* Because all keys of database are removed, reset average ttl. */
         dbarray[j].avg_ttl = 0;
         dbarray[j].expires_cursor = 0;

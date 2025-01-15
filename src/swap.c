@@ -17,11 +17,6 @@
 #define KB 1024
 #define MB (1024 * 1024)
 
-#define ROCKSDB_DIR "rocksdb.dir"
-
-#define META_CF 0
-#define DB_CF(dbid) (dbid+1)
-
 static sds swapDataEncodeObject(swapDataEntry *entry);
 static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len);
 static void swapDataEntryBatchFinished(swapDataEntryBatch *eb, int async);
@@ -1808,6 +1803,7 @@ int swapIterateGenerateRDB(rio *rdb, int rdbflags, int dbid, long key_count, siz
         /* Set usage information (for swap). */
         objectSetLRUOrLFU(o, lfu_freq, -1, LRU_CLOCK(), 1000);
 
+        /* Save the key-value pair to the RDB. */
         if (rdbSaveKeyValuePair(rdb, &keyobj, o, expiretime) == -1) {
             sdsfree(key);
             goto werr;

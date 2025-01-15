@@ -1096,6 +1096,13 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val, long long expiretime) {
         if (rdbWriteRaw(rdb,buf,1) == -1) return -1;
     }
 
+    /* Save obj version */
+    if (server.swap_enabled) {
+        uint64_t version = getVersion(val);
+        if (rdbSaveType(rdb, RDB_OPCODE_VERSION) == -1) return -1;
+        if (rdbSaveLen(rdb, version) == -1) return -1;
+    }
+
     /* Save type, key, value */
     if (rdbSaveObjectType(rdb,val) == -1) return -1;
     if (rdbSaveStringObject(rdb,key) == -1) return -1;
@@ -1143,6 +1150,9 @@ int rdbSaveInfoAuxFields(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     if (rdbSaveAuxFieldStrInt(rdb,"openamdc-bits",redis_bits) == -1) return -1;
     if (rdbSaveAuxFieldStrInt(rdb,"ctime",time(NULL)) == -1) return -1;
     if (rdbSaveAuxFieldStrInt(rdb,"used-mem",zmalloc_used_memory()) == -1) return -1;
+    if (server.swap_enabled) {
+        if (rdbSaveAuxFieldStrInt(rdb,"swap_data_version",getGblVersion()) == -1) return -1;
+    }
 
     /* Handle saving options that generate aux fields. */
     if (rsi) {
@@ -2441,6 +2451,7 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     }
 
     /* Key-specific attributes, set by opcodes before the key type. */
+    uint64_t version = 0;
     long long lru_idle = -1, lfu_freq = -1, expiretime = -1, now = mstime();
     long long lru_clock = LRU_CLOCK();
 
@@ -2477,6 +2488,9 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
             uint64_t qword;
             if ((qword = rdbLoadLen(rdb,NULL)) == RDB_LENERR) goto eoferr;
             lru_idle = qword;
+            continue; /* Read next opcode. */
+        } else if (server.swap_enabled && type == RDB_OPCODE_VERSION) {
+            if ((version = rdbLoadLen(rdb, NULL)) == RDB_LENERR) goto eoferr;
             continue; /* Read next opcode. */
         } else if (type == RDB_OPCODE_EOF) {
             /* EOF: End of file, exit the main loop. */
@@ -2556,6 +2570,9 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
             } else if (!strcasecmp(auxkey->ptr,"aof-preamble")) {
                 long long haspreamble = strtoll(auxval->ptr,NULL,10);
                 if (haspreamble) serverLog(LL_NOTICE,"RDB has an AOF tail");
+            } else if (server.swap_enabled && !strcasecmp(auxkey->ptr,"swap_data_version")) {
+                uint64_t swap_data_version = strtoull(auxval->ptr,NULL,10);
+                setGblVersion(swap_data_version);
             } else if (!strcasecmp(auxkey->ptr,"openamdc-bits")) {
                 /* Just ignored. */
             } else {
@@ -2686,6 +2703,9 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
 
             /* Set usage information (for eviction). */
             objectSetLRUOrLFU(val,lfu_freq,lru_idle,lru_clock,1000);
+            
+            /* Set version information. */
+            if (server.swap_enabled) setVersion(val, version);
 
             /* call key space notification on key loaded for modules only */
             moduleNotifyKeyspaceEvent(NOTIFY_LOADED, "loaded", &keyobj, db->id);

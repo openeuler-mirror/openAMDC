@@ -27,13 +27,18 @@
 
 #define SWAP_HOTMEMORY_FLAG_LFU 1
 
+#define META_CF 0
+#define DB_CF(dbid) (dbid+1)
+
+#define ROCKSDB_DIR "rocksdb.dir"
+
 typedef struct rocks {
-  rocksdb_t *db;
-  rocksdb_options_t *db_opts;
-  rocksdb_readoptions_t *ropts;
-  rocksdb_writeoptions_t *wopts;
-  rocksdb_column_family_handle_t **cf_handles;
-  rocksdb_snapshot_t *snapshot;
+    rocksdb_t *db;
+    rocksdb_options_t *db_opts;
+    rocksdb_readoptions_t *ropts;
+    rocksdb_writeoptions_t *wopts;
+    rocksdb_column_family_handle_t **cf_handles;
+    rocksdb_snapshot_t *snapshot;
 } rocks;
 
 int rocksInit(void);
