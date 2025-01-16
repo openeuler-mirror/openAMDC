@@ -81,6 +81,7 @@ typedef enum {
 int cuckooFilterInit(cuckooFilter *filter, uint64_t capacity, uint16_t bucketSize,
                       uint16_t maxIterations, uint16_t expansion, int lazy);
 void cuckooFilterFree(cuckooFilter *filter);
+void cuckooFilterClear(cuckooFilter *filter);
 cuckooInsertStatus cuckooFilterInsertUnique(cuckooFilter *filter, const char *key, size_t klen);
 cuckooInsertStatus cuckooFilterInsert(cuckooFilter *filter, const char *key, size_t klen);
 int cuckooFilterDelete(cuckooFilter *filter, const char *key, size_t klen);

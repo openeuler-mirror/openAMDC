@@ -65,6 +65,7 @@ typedef struct swapDataEntry {
 
 swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, robj *val, long long expiretime);
 void swapDataEntryRelease(swapDataEntry *entry);
+int swapDataEntrySubmit(swapDataEntry *entry, int idx);
 
 #define SWAP_DATA_ENTRY_BATCH_BUFFER_SIZE 16
 

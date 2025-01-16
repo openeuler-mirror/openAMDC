@@ -422,12 +422,7 @@ long long emptyDbStructure(redisDb *dbarray, int dbnum, int async,
             }
             removed += dbarray[j].cold_data_size;
 
-            cuckooFilterFree(&server.swap->cold_filter[j]);
-            cuckooFilterInit(&server.swap->cold_filter[j],
-                             server.swap_cuckoofilter_size_for_level,
-                             server.swap_cuckoofilter_bucket_size,
-                             CF_DEFAULT_MAX_ITERATIONS,
-                             CF_DEFAULT_EXPANSION, 1);
+            cuckooFilterClear(&server.swap->cold_filter[j]);
             dbarray[j].cold_data_size = 0;
         }
 
@@ -801,6 +796,31 @@ void keysCommand(client *c) {
         }
     }
     dictReleaseIterator(di);
+
+    if (server.swap_enabled) {
+        rocksdb_iterator_t *iter =
+            rocksdb_create_iterator_cf(server.swap->rocks->db,
+                                       server.swap->rocks->ropts,
+                                       server.swap->rocks->cf_handles[DB_CF(c->db->id)]);
+        for (rocksdb_iter_seek_to_first(iter);
+             rocksdb_iter_valid(iter);
+             rocksdb_iter_next(iter)) {
+            robj *keyobj;
+            size_t klen;
+            char *key_buf = (char *)rocksdb_iter_key(iter, &klen);
+
+            if (allkeys || stringmatchlen(pattern,plen,key_buf,klen,0)) {
+                keyobj = createStringObject(key_buf,klen);
+                if (!keyIsExpired(c->db,keyobj)) {
+                    addReplyBulk(c,keyobj);
+                    numkeys++;
+                }
+                decrRefCount(keyobj);
+            }
+        }
+        rocksdb_iter_destroy(iter);
+    }
+
     setDeferredArrayLen(c,replylen,numkeys);
 }
 

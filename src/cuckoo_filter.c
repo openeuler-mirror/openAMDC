@@ -46,6 +46,7 @@ int cuckooFilterInit(cuckooFilter *filter, uint64_t levelSize, uint16_t bucketSi
                       uint16_t maxIterations, uint16_t expansion, int lazy) {
     uint64_t capacity = levelSize / sizeof(CuckooFingerprint);
     memset(filter, 0, sizeof(*filter));
+    filter->numFilters = 0;
     filter->expansion = getNextN2(expansion);
     filter->bucketSize = bucketSize;
     filter->maxIterations = maxIterations;
@@ -66,6 +67,11 @@ void cuckooFilterFree(cuckooFilter *filter) {
         CUCKOO_FREE(filter->tables[ii].data);
     }
     CUCKOO_FREE(filter->tables);
+}
+
+void cuckooFilterClear(cuckooFilter *filter) {
+    cuckooFilterFree(filter);
+    filter->numFilters = 0;
 }
 
 static int cuckooFilterGrow(cuckooFilter *filter) {

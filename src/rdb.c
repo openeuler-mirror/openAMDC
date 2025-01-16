@@ -2703,11 +2703,25 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
 
             /* Set usage information (for eviction). */
             objectSetLRUOrLFU(val,lfu_freq,lru_idle,lru_clock,1000);
-            
-            /* Set version information. */
-            if (server.swap_enabled) setVersion(val, version);
 
-            /* call key space notification on key loaded for modules only */
+            /* If swap is enabled, set the version information and submit the data to swap. */
+            if (server.swap_enabled) {
+                /* Set version information. */
+                setVersion(val, version);
+                /* If the hot data cache is not enabled. */
+                if (!server.swap_hotmemory) {
+                    /* Create a string object for the key. */
+                    robj *keyobj = createStringObject(key, sdslen(key));
+                    /* Create a swap data entry for swapping out the object. */
+                    swapDataEntry *entry = swapDataEntryCreate(SWAP_OUT, db->id, keyobj, val, expiretime);
+                    /* Submit the swap data entry to the swap. */
+                    swapDataEntrySubmit(entry, -1);
+                    /* Decrement the reference count of the key. */
+                    decrRefCount(keyobj);
+                }
+            }
+
+            /* Call key space notification on key loaded for modules only. */
             moduleNotifyKeyspaceEvent(NOTIFY_LOADED, "loaded", &keyobj, db->id);
         }
 

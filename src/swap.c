@@ -190,7 +190,7 @@ void swapDataEntryRelease(swapDataEntry *entry) {
 /* Submitting a swap data entry to a batch. It ensures that the entry's intention is valid,
  * checks if the current batch is full, and either submits the batch or adds the entry to
  * the batch accordingly. */
-static int swapDataEntrySubmit(swapDataEntry *entry, int idx) {
+int swapDataEntrySubmit(swapDataEntry *entry, int idx) {
     /* Ensure that the entry's intention is either SWAP_OUT or SWAP_DEL. */
     serverAssert(entry->intention == SWAP_OUT || entry->intention == SWAP_DEL);
 
