@@ -293,14 +293,51 @@ robj *dbRandomKey(redisDb *db) {
 
     while(1) {
         sds key;
-        robj *keyobj;
+        robj *keyobj = NULL;
 
-        de = dictGetFairRandomKey(db->dict);
-        if (de == NULL) return NULL;
+        if (server.swap_enabled && db->cold_data_size) {
+            size_t totalsize = dictSize(db->dict) + db->cold_data_size;
+            size_t random = rand() % totalsize;
+            if (random >= dictSize(db->dict)) {
+                char *key_buf;
+                size_t step, klen;
+                rocksdb_iterator_t *iter =
+                    rocksdb_create_iterator_cf(server.swap->rocks->db,
+                                               server.swap->rocks->ropts,
+                                               server.swap->rocks->cf_handles[DB_CF(db->id)]);
+                random = rand() % db->cold_data_size;
+                if (random < db->cold_data_size / 2) {
+                    rocksdb_iter_seek_to_first(iter);
+                    step = 0;
+                }
+                else {
+                    rocksdb_iter_seek_to_last(iter);
+                    step = db->cold_data_size - 1;
+                }
+                while (rocksdb_iter_valid(iter)) {
+                    if (step == random) break;
+                    if (random < db->cold_data_size / 2) {
+                        rocksdb_iter_next(iter);
+                        step++;
+                    }
+                    else {
+                        rocksdb_iter_prev(iter);
+                        step--;
+                    }
+                }
+                key_buf = (char *)rocksdb_iter_key(iter, &klen);
+                keyobj = createStringObject(key_buf, klen);
+            }
+        } 
 
-        key = dictGetKey(de);
-        keyobj = createStringObject(key,sdslen(key));
-        if (dictFind(db->expires,key)) {
+        if (keyobj == NULL) {
+            de = dictGetFairRandomKey(db->dict);
+            if (de == NULL) return NULL;
+            
+            key = dictGetKey(de);
+            keyobj = createStringObject(key,sdslen(key));
+        }
+        if (dictFind(db->expires,keyobj->ptr)) {
             if (allvolatile && server.masterhost && --maxtries == 0) {
                 /* If the DB is composed only of keys with an expire set,
                  * it could happen that all the keys are already logically
