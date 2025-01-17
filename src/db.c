@@ -1463,6 +1463,11 @@ void swapdbCommand(client *c) {
         addReplyError(c,"SWAPDB is not allowed in cluster mode");
         return;
     }
+    /* Not allowed in swap mode: swap cost is too high. */
+    if (server.swap_enabled) {
+        addReplyError(c,"SWAPDB is not allowed in swap mode");
+        return;
+    }
 
     /* Get the two DBs indexes. */
     if (getIntFromObjectOrReply(c, c->argv[1], &id1,

@@ -850,6 +850,23 @@ int swapFlushThread(int iel, int force) {
     return C_OK;
 }
 
+/* Flushes all swap batches at iel worker thread. */
+int swapFlushAllThread(int force) {
+    /* Check if the server has swap functionality enabled,
+     * return immediately if not */
+    if (!server.swap_enabled) return C_OK;
+
+    for (int iel = 0; iel < MAX_THREAD_VAR; ++iel) {
+        if (iel < server.worker_threads_num || 
+            (iel == MODULE_THREAD_ID && server.worker_threads_num > 1)) {
+            if (swapFlushThread(iel, force) == C_ERR) {
+                return C_ERR;
+            }
+        }
+    }
+    return C_OK;
+}
+
 /* Retrieving an object from the swap database (RocksDB) and adding it back
  * into the memory. It involves decoding the object data, checking expiration
  * times, and updating object metadata such as frequency of use.*/
@@ -1126,7 +1143,7 @@ int swapHotMemoryLoad(void) {
     size_t mem_reported, mem_used;
 
     /* Allocate memory for iterators */
-    iterators = zcalloc(sizeof(rocksdb_iterator_t *) * server.dbnum + 1);
+    iterators = zcalloc(sizeof(rocksdb_iterator_t *) * (server.dbnum + 1));
     rocksdb_create_iterators(server.swap->rocks->db,
                              server.swap->rocks->ropts,
                              server.swap->rocks->cf_handles,
@@ -1912,7 +1929,7 @@ void swapCommand(client *c) {
 
     robj *o;
     if (!strcasecmp(c->argv[1]->ptr, "where") && c->argc == 3) {
-        if ((o = lookupKeyReadWithFlags(c->db, c->argv[2], LOOKUP_NOSWAP|LOOKUP_NONOTIFY))) {
+        if ((o = lookupKeyReadWithFlags(c->db, c->argv[2], LOOKUP_NOSWAP|LOOKUP_NONOTIFY|LOOKUP_NOTOUCH))) {
             addReplyLongLong(c, 1);
         } else {
             if (cuckooFilterContains(&server.swap->cold_filter[c->db->id],
