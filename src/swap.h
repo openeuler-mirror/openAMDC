@@ -48,11 +48,12 @@ void rocksClose(void);
 typedef struct swapDataRetrieval {
     int dbid;
     robj *val;
-    long long expiretime;
     long long lfu_freq;
+    long long expiretime;
+    uint64_t version;
 } swapDataRetrieval;
 
-swapDataRetrieval *swapDataRetrievalCreate(int dbid, robj *val, long long expiretime, long long lfu_freq);
+swapDataRetrieval *swapDataRetrievalCreate(int dbid, robj *val, long long lfu_freq, long long expiretime, uint64_t version);
 void swapDataRetrievalRelease(swapDataRetrieval *r);
 
 typedef struct swapDataEntry {
@@ -61,11 +62,12 @@ typedef struct swapDataEntry {
     robj *key;
     robj *val;
     long long expiretime;
+    uint64_t version;
 } swapDataEntry;
 
-swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, robj *val, long long expiretime);
+swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, robj *val, long long expiretime, uint64_t version);
 void swapDataEntryRelease(swapDataEntry *entry);
-int swapDataEntrySubmit(swapDataEntry *entry, int idx);
+int swapDataEntrySubmit(swapDataEntry *entry, int idx, int force);
 
 #define SWAP_DATA_ENTRY_BATCH_BUFFER_SIZE 16
 

@@ -2450,6 +2450,7 @@ int objectSetLRUOrLFU(robj *val, long long lfu_freq, long long lru_idle,
 #define LOOKUP_NONE 0
 #define LOOKUP_NOTOUCH (1<<0)
 #define LOOKUP_NONOTIFY (1<<1)
+#define LOOKUP_NOSWAP (1<<2)
 void dbAdd(redisDb *db, robj *key, robj *val);
 int dbAddRDBLoad(redisDb *db, sds key, robj *val);
 void dbOverwrite(redisDb *db, robj *key, robj *val);
@@ -2806,6 +2807,7 @@ void aclCommand(client *c);
 void lcsCommand(client *c);
 void resetCommand(client *c);
 void failoverCommand(client *c);
+void swapCommand(client *c);
 
 #if defined(__GNUC__)
 void *calloc(size_t count, size_t size) __attribute__ ((deprecated));

@@ -62,7 +62,7 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
         return val;
     } else {
         /* If swap is enabled and the key is not found in cold filter. */
-        if (server.swap_enabled &&
+        if (server.swap_enabled && !(flags & LOOKUP_NOSWAP) &&
             cuckooFilterContains(&server.swap->cold_filter[db->id], key->ptr, sdslen(key->ptr))) {
             /* Attempt to swap the key back into memory. */
             robj *val = swapIn(key, db->id);
@@ -328,7 +328,7 @@ robj *dbRandomKey(redisDb *db) {
                 key_buf = (char *)rocksdb_iter_key(iter, &klen);
                 keyobj = createStringObject(key_buf, klen);
             }
-        } 
+        }
 
         if (keyobj == NULL) {
             de = dictGetFairRandomKey(db->dict);
