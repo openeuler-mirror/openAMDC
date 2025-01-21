@@ -78,7 +78,7 @@ typedef enum {
     CUCKOO_FILTER_MEMALLOCFAILED = -2
 } cuckooInsertStatus;
 
-int cuckooFilterInit(cuckooFilter *filter, uint64_t capacity, uint16_t bucketSize,
+int cuckooFilterInit(cuckooFilter *filter, uint64_t levelSize, uint16_t bucketSize,
                       uint16_t maxIterations, uint16_t expansion, int lazy);
 void cuckooFilterFree(cuckooFilter *filter);
 void cuckooFilterClear(cuckooFilter *filter);

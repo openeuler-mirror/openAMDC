@@ -21,17 +21,6 @@ static sds swapDataEncodeObject(swapDataEntry *entry);
 static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len);
 static void swapDataEntryBatchFinished(swapDataEntryBatch *eb, int async);
 
-/* Swap data entry batch filter type */
-dictType swapBatchFilterType = {
-    dictSdsHash,                /* hash function */
-    NULL,                       /* key dup */
-    NULL,                       /* val dup */
-    dictSdsKeyCompare,          /* key compare */
-    NULL,                       /* key destructor */
-    NULL,                       /* val destructor */
-    NULL,                       /* allow to expand */
-};
-
 /* Initializes the RocksDB database. */
 int rocksInit(void) {
     server.swap->rocks = zmalloc(sizeof(struct rocks));
@@ -244,10 +233,6 @@ static int swapMoveKeyOutOfMemory(swapDataEntry *entry, int async) {
     /* Increment the cold data size in the database. */
     server.db[entry->dbid].cold_data_size++;
 
-    /* If there are any expired keys in the database, remove this key from the expires dictionary. */
-    if (dictSize(server.db[entry->dbid].expires) > 0)
-        dictDelete(server.db[entry->dbid].expires,entry->key->ptr);
-    
     /* Attempt to unlink the key from the main dictionary. */
     dictEntry *de = dictUnlink(server.db[entry->dbid].dict, entry->key->ptr);
     if (de) {
@@ -456,80 +441,92 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
     /* Return immediately if there are no entries in the batch. */
     if (eb->count == 0) return C_OK;
 
-    sds buf;
-    int status = C_OK;
+    sds buf = NULL;
     char *err = NULL;
     mstime_t swap_latency;
-    dictEntry *de;
-    dict *filter = dictCreate(&swapBatchFilterType, NULL);
-    rocksdb_writebatch_t *wb = rocksdb_writebatch_create();
+    cuckooFilter filter;
 
-    /* Filter the data and keep the data of the latest version. */
-    for (int i = eb->count-1; i >= 0; i--) {
-        swapDataEntry *entry = eb->entries[i];
-        if ((de = dictFind(filter, entry->key->ptr)) == NULL) {
-            dictAdd(filter, entry->key->ptr, entry);
-        }
+    /* Initialize the Cuckoo Filter if there are multiple entries in the batch. */
+    if (eb->count > 1 &&
+        cuckooFilterInit(&filter,
+                         eb->count * sizeof(CuckooFingerprint),
+                         server.swap_cuckoofilter_bucket_size,
+                         CF_DEFAULT_MAX_ITERATIONS,
+                         CF_DEFAULT_EXPANSION, 1) == -1) {
+        serverLog(LL_WARNING, "Failed to initialize Cuckoo Filter");
+        return C_ERR;
     }
 
     /* Start monitoring the latency for the swap-batch operation. */
     latencyStartMonitor(swap_latency);
 
-    /* Process each entry in the filter dictionary. */
-    dictIterator *iter = dictGetIterator(filter);
-    while((de = dictNext(iter)) != NULL) {
-        swapDataEntry *entry = dictGetVal(de);
+    /* Filter the data and keep the data of the latest version. */
+    for (int i = eb->count-1; i >= 0; i--) {
+        swapDataEntry *entry = eb->entries[i];
+        /* Check if the entry's key is already in the filter. */
+        if (eb->count > 1 &&
+            cuckooFilterContains(&filter, entry->key->ptr, sdslen(entry->key->ptr))) {
+            continue;
+        }
         /* Handle entries with intention to swap out. */
         if (entry->intention == SWAP_OUT) {
             /* Encode the object associated with the entry. */
             if ((buf = swapDataEncodeObject(entry)) == NULL) {
                 serverLog(LL_WARNING, "Swap data encode object failed, key:%s", (sds)entry->key->ptr);
-                status = C_ERR;
                 goto cleanup;
             }
-            /* Add the encoded object to the RocksDB write batch. */
-            rocksdb_writebatch_put_cf(wb,
-                                      server.swap->rocks->cf_handles[DB_CF(entry->dbid)],
-                                      entry->key->ptr,
-                                      sdslen(entry->key->ptr),
-                                      buf,
-                                      sdslen(buf));
+            /* Write the encoded object to the RocksDB. */
+            rocksdb_put_cf(server.swap->rocks->db,
+                           server.swap->rocks->wopts,
+                           server.swap->rocks->cf_handles[DB_CF(entry->dbid)],
+                           entry->key->ptr,
+                           sdslen(entry->key->ptr),
+                           buf,
+                           sdslen(buf),
+                           &err);
+            if (err != NULL) {
+                serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
+                zlibc_free(err);
+                goto cleanup;
+            }
             /* Free the encoded buffer. */
             sdsfree(buf);
             /* Increment the total count of swap out keys in the swap statistics. */
             server.stat_swap_out_keys_total++;
         /* Handle entries with intention to delete. */
         } else if (entry->intention == SWAP_DEL) {
-            /* Delete the key from RocksDB using the write batch. */
-            rocksdb_writebatch_delete_cf(wb,
-                                         server.swap->rocks->cf_handles[DB_CF(entry->dbid)],
-                                         entry->key->ptr,
-                                         sdslen(entry->key->ptr));
+            /* Delete the key from RocksDB. */
+            rocksdb_delete_cf(server.swap->rocks->db,
+                              server.swap->rocks->wopts,
+                              server.swap->rocks->cf_handles[DB_CF(entry->dbid)],
+                              entry->key->ptr,
+                              sdslen(entry->key->ptr),
+                              &err);
+            if (err != NULL) {
+                serverLog(LL_WARNING, "Rocksdb delete failed, err:%s", err);
+                zlibc_free(err);
+                goto cleanup;
+            }
             /* Increment the total count of deleted keys in the swap statistics. */
             server.stat_swap_del_keys_total++;
         } else {
             serverPanic("Invilid swap intention type: %d\n", entry->intention);
         }
-    }
-
-    /* Write the batch to RocksDB. */
-    rocksdb_write(server.swap->rocks->db, server.swap->rocks->wopts, wb, &err);
-    if (err != NULL) {
-        serverLog(LL_WARNING, "Rocksdb write batch failed, err:%s", err);
-        zlibc_free(err);
-        status = C_ERR;
-        goto cleanup;
+        /* Insert the key into the filter if it's a batch operation. */
+        if (eb->count > 1) {
+            cuckooFilterInsert(&filter, entry->key->ptr, sdslen(entry->key->ptr));
+        }
     }
 
     latencyEndMonitor(swap_latency);
     latencyAddSampleIfNeeded("swap-batch", swap_latency);
+    if (eb->count > 1) cuckooFilterFree(&filter);
+    return C_OK;
 
 cleanup:
-    /* Release resources. */
-    dictReleaseIterator(iter);
-    dictRelease(filter);
-    rocksdb_writebatch_destroy(wb);
-    return status;
+    if (buf != NULL) sdsfree(buf);
+    if (eb->count > 1) cuckooFilterFree(&filter);
+    return C_ERR;
 }
 
 /* Inserts the key into the cold filter and moves the key out of memory according to the swap-out policy. */
@@ -928,8 +925,9 @@ robj *swapIn(robj *key, int dbid) {
         server.db[dbid].cold_data_size--;
         server.stat_swap_in_expired_keys_skipped++;
     } else {
-        /* Add the new object in the hash table */
-        int added = dbAddRDBLoad(server.db+dbid,key->ptr,o);
+        /* Add the new object in the hash table. */
+        sds copy = sdsdup(key->ptr);
+        int added = dbAddRDBLoad(server.db+dbid,copy,o);
         if (!added) {
             serverLog(LL_WARNING,"Rocksdb has duplicated key '%s' in DB %d",(sds)key->ptr,dbid);
             serverPanic("Duplicated key found in Rocksdb");
@@ -1648,6 +1646,7 @@ int performSwapData(void) {
     monotime swapTimer;
     elapsedStart(&swapTimer);
 
+    /* Swap data until we're under the limit. */
     while (mem_freed < (long long)mem_tofree) {
         int k, i;
         robj *bestval = NULL;
@@ -1661,6 +1660,7 @@ int performSwapData(void) {
         swapDataEntry *entry;
         swapPoolEntry *pool = server.swap->pool;
 
+        /* Find the best key to swap. */
         while(bestkey == NULL) {
             unsigned long total_keys = 0, keys;
 
