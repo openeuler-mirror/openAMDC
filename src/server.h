@@ -33,6 +33,7 @@
 #include <sys/socket.h>
 #include <lua.h>
 #include <signal.h>
+#include <rocksdb/c.h>
 
 #ifdef HAVE_LIBSYSTEMD
 #include <systemd/sd-daemon.h>
@@ -968,6 +969,8 @@ typedef struct client {
     int async_write_handler_active;
     int async_ops;
     clientReplyBlock *async_reply_block;
+    unsigned long *cold_data_iter_cursor;
+    rocksdb_iterator_t **cold_data_iters;
 } client;
 
 struct saveparam {

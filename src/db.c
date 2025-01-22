@@ -1011,11 +1011,51 @@ void scanGenericCommand(client *c, robj *o, unsigned long cursor) {
          * it is possible to fetch more data in a type-dependent way. */
         privdata[0] = keys;
         privdata[1] = o;
-        do {
-            cursor = dictScan(ht, cursor, scanCallback, NULL, privdata);
-        } while (cursor &&
-              maxiterations-- &&
-              listLength(keys) < (unsigned long)count);
+        if (!server.swap_enabled ||
+            (server.swap_enabled && c->cold_data_iter_cursor[c->db->id] == 0)) {
+            do {
+                cursor = dictScan(ht, cursor, scanCallback, NULL, privdata);
+            } while (cursor &&
+                maxiterations-- &&
+                listLength(keys) < (unsigned long)count);
+        }
+        /* Initialize the iterator if needed. */
+        if (server.swap_enabled &&
+            cursor == 0 &&
+            c->cold_data_iter_cursor[c->db->id] == 0) {
+            c->cold_data_iter_cursor[c->db->id] = c->db->cold_data_size;
+            cursor = c->cold_data_iter_cursor[c->db->id];
+            c->cold_data_iters[c->db->id] =
+                rocksdb_create_iterator_cf(server.swap->rocks->db,
+                                           server.swap->rocks->ropts,
+                                           server.swap->rocks->cf_handles[DB_CF(c->db->id)]);
+            rocksdb_iter_seek_to_first(c->cold_data_iters[c->db->id]);
+        }
+
+        /* If we are in swap mode, we need to iterate the cold data. */
+        if (server.swap_enabled &&
+            c->cold_data_iter_cursor[c->db->id] &&
+            listLength(keys) < (unsigned long)count) {
+            if (cursor != c->cold_data_iter_cursor[c->db->id]){
+                addReplyError(c, "Invalid cursor of scan command");
+                goto cleanup;
+            }
+            while (rocksdb_iter_valid(c->cold_data_iters[c->db->id]) &&
+                   listLength(keys) < (unsigned long)count) {
+                size_t klen;
+                char *key_buf = (char *)rocksdb_iter_key(c->cold_data_iters[c->db->id], &klen);
+                robj *kobj = createStringObject(key_buf, klen);
+                listAddNodeTail(keys, kobj);
+                rocksdb_iter_next(c->cold_data_iters[c->db->id]);
+                c->cold_data_iter_cursor[c->db->id]--;
+            }
+            if (!rocksdb_iter_valid(c->cold_data_iters[c->db->id])) {
+                rocksdb_iter_destroy(c->cold_data_iters[c->db->id]);
+                c->cold_data_iters[c->db->id] = NULL;
+                c->cold_data_iter_cursor[c->db->id] = 0;
+            }
+            cursor = c->cold_data_iter_cursor[c->db->id];
+        }
     } else if (o->type == OBJ_SET) {
         int pos = 0;
         int64_t ll;
