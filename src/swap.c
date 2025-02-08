@@ -332,7 +332,7 @@ static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len)
         /* Check if the key already expired. */
         if (val == NULL) {
             if (error == RDB_LOAD_ERR_EMPTY_KEY) {
-                server.stat_swap_in_empty_keys_skipped++;
+                server.db[dbid].stat_swap_in_empty_keys_skipped++;
                 serverLog(LL_WARNING, "Decode object skipping empty key: %s", (sds)key->ptr);
             } else {
                 goto rerr;
@@ -492,7 +492,7 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
             /* Free the encoded buffer. */
             sdsfree(buf);
             /* Increment the total count of swap out keys in the swap statistics. */
-            server.stat_swap_out_keys_total++;
+            server.db[entry->dbid].stat_swap_out_keys_total++;
         /* Handle entries with intention to delete. */
         } else if (entry->intention == SWAP_DEL) {
             /* Delete the key from RocksDB. */
@@ -508,7 +508,7 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
                 goto cleanup;
             }
             /* Increment the total count of deleted keys in the swap statistics. */
-            server.stat_swap_del_keys_total++;
+            server.db[entry->dbid].stat_swap_del_keys_total++;
         } else {
             serverPanic("Invilid swap intention type: %d\n", entry->intention);
         }
@@ -923,7 +923,7 @@ robj *swapIn(robj *key, int dbid) {
         /* Remove the key from the cold filter. */
         cuckooFilterDelete(&server.swap->cold_filter[dbid], key->ptr, sdslen(key->ptr));
         server.db[dbid].cold_data_size--;
-        server.stat_swap_in_expired_keys_skipped++;
+        server.db[dbid].stat_swap_in_expired_keys_skipped++;
     } else {
         /* Add the new object in the hash table. */
         sds copy = sdsdup(key->ptr);
@@ -948,7 +948,7 @@ robj *swapIn(robj *key, int dbid) {
     zlibc_free(val);
     latencyEndMonitor(swap_latency);
     latencyAddSampleIfNeeded("swap-in", swap_latency);
-    server.stat_swap_in_keys_total++;
+    server.db[dbid].stat_swap_in_keys_total++;
     return o;
 }
 
@@ -971,7 +971,7 @@ static void swapData(int intention, robj *key, robj *val, int dbid) {
          * the relevant information for the swap operation */
         swapDataEntry *entry = swapDataEntryCreate(intention, dbid, key, val, expire, version);
         /* Add the created swap data entry to the tail of
-         * the pending requests list for the current thread*/
+         * the pending requests list for the current thread. */
         listAddNodeTail(server.swap->pending_entries[threadId], entry);
     }
 }
@@ -1226,7 +1226,7 @@ int swapHotMemoryLoad(void) {
             }
         } else {
             /* We ignore fields we don't understand. */
-            serverLog(LL_DEBUG,"Unrecognized rocksdb meta field");
+            serverLog(LL_WARNING,"Unrecognized rocksdb meta field");
         }
     }
 
@@ -1298,7 +1298,7 @@ int swapHotMemoryLoad(void) {
             /* Delete the key from the cold filter. */
             cuckooFilterDelete(&server.swap->cold_filter[dbid], key, sdslen(key));
             server.db[dbid].cold_data_size--;
-            server.stat_swap_in_expired_keys_skipped++;
+            server.db[dbid].stat_swap_in_expired_keys_skipped++;
         } else {
             /* Add the new object in the hash table. */
             int added = dbAddRDBLoad(server.db+dbid,key,o);
@@ -1724,6 +1724,7 @@ int performSwapData(void) {
             delta -= (long long) zmalloc_used_memory();
             mem_freed += delta;
             keys_swapped++;
+            server.db[bestdbid].stat_swap_out_keys_total++;
             decrRefCount(keyobj);
 
             if (keys_swapped % server.swap_data_entry_batch_size == 0) {
@@ -1786,7 +1787,6 @@ cant_free:
 
     latencyEndMonitor(latency);
     latencyAddSampleIfNeeded("swap-cycle",latency);
-    server.stat_swap_out_keys_total += keys_swapped;
     return result;
 }
 

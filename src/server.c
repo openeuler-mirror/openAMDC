@@ -3260,11 +3260,6 @@ void resetServerStats(void) {
         server.stat_total_error_replies[iel] = 0;
     server.stat_dump_payload_sanitizations = 0;
     server.aof_delayed_fsync = 0;
-    server.stat_swap_in_empty_keys_skipped = 0;
-    server.stat_swap_in_expired_keys_skipped = 0;
-    server.stat_swap_in_keys_total = 0;
-    server.stat_swap_out_keys_total = 0;
-    server.stat_swap_del_keys_total = 0;
 }
 
 /* Make the thread killable at any time, so that kill threads functions
@@ -3415,6 +3410,13 @@ void initServer(void) {
         server.db[j].defrag_later = listCreate();
         listSetFreeMethod(server.db[j].defrag_later,(void (*)(void*))sdsfree);
         server.db[j].cold_data_size = 0;
+        server.db[j].stat_total_lookup_count = 0;
+        server.db[j].stat_hit_ram_count = 0;
+        server.db[j].stat_swap_in_empty_keys_skipped = 0;
+        server.db[j].stat_swap_in_expired_keys_skipped = 0;
+        server.db[j].stat_swap_in_keys_total = 0;
+        server.db[j].stat_swap_out_keys_total = 0;
+        server.db[j].stat_swap_del_keys_total = 0;
     }
 
     evictionPoolAlloc(); /* Initialize the LRU keys pool. */
@@ -5615,9 +5617,30 @@ sds genRedisInfoString(const char *section) {
             if (server.swap_enabled) keys += server.db[j].cold_data_size;
             vkeys = dictSize(server.db[j].expires);
             if (keys || vkeys) {
-                info = sdscatprintf(info,
-                    "db%d:keys=%lld,expires=%lld,avg_ttl=%lld\r\n",
-                    j, keys, vkeys, server.db[j].avg_ttl);
+                if (server.swap_enabled) {
+                    float keys_in_ram_radio = (dictSize(server.db[j].dict) * 100.0) / keys;
+                    float ram_hit_radio = server.db[j].stat_total_lookup_count == 0
+                        ? 0 : (server.db[j].stat_hit_ram_count * 100.0) / server.db[j].stat_total_lookup_count;
+                    info = sdscatprintf(info,
+                        "db%d:keys=%lld,expires=%lld,avg_ttl=%lld,"
+                        "keys_in_ram_radio=%.2f%%,ram_hit_radio=%.2f%%,"
+                        "stat_swap_in_keys_total:%lld,"
+                        "stat_swap_in_empty_keys_skipped:%lld,"
+                        "stat_swap_in_expired_keys_skipped:%lld,"
+                        "stat_swap_out_keys_total:%lld,"
+                        "stat_swap_del_keys_total:%lld\r\n",
+                        j, keys, vkeys, server.db[j].avg_ttl,
+                        keys_in_ram_radio, ram_hit_radio,
+                        server.db[j].stat_swap_in_keys_total,
+                        server.db[j].stat_swap_in_empty_keys_skipped,
+                        server.db[j].stat_swap_in_expired_keys_skipped,
+                        server.db[j].stat_swap_out_keys_total,
+                        server.db[j].stat_swap_del_keys_total);
+                } else {
+                    info = sdscatprintf(info,
+                        "db%d:keys=%lld,expires=%lld,avg_ttl=%lld\r\n",
+                        j, keys, vkeys, server.db[j].avg_ttl);
+                }
             }
         }
     }
@@ -5637,18 +5660,16 @@ sds genRedisInfoString(const char *section) {
         if (sections++) info = sdscat(info,"\r\n");
         info = sdscatprintf(info,
         "# Swap\r\n"
-        "swap_enabled:%d\r\n"
-        "stat_swap_in_keys_total:%lld\r\n"
-        "stat_swap_in_empty_keys_skipped:%lld\r\n"
-        "stat_swap_in_expired_keys_skipped:%lld\r\n"
-        "stat_swap_out_keys_total:%lld\r\n"
-        "stat_swap_del_keys_total:%lld\r\n",
-        server.swap_enabled,
-        server.stat_swap_in_keys_total,
-        server.stat_swap_in_empty_keys_skipped,
-        server.stat_swap_in_expired_keys_skipped,
-        server.stat_swap_out_keys_total,
-        server.stat_swap_del_keys_total);
+        "swap_enabled:%d\r\n",
+        server.swap_enabled);
+        if (server.swap_enabled) {
+            rocksdb_options_enable_statistics(server.swap->rocks->db_opts);
+            char* rocks_stats = rocksdb_property_value(server.swap->rocks->db, "rocksdb.stats");
+            if (rocks_stats != NULL) {
+                info = sdscatprintf(info, "rocksdb_stats:%s\r\n", rocks_stats);
+                zlibc_free(rocks_stats);
+            }
+        }
     }
     return info;
 }

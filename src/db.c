@@ -59,6 +59,8 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
                 val->lru = LRU_CLOCK();
             }
         }
+        db->stat_hit_ram_count++;
+        db->stat_total_lookup_count++;
         return val;
     } else {
         /* If swap is enabled and the key is not found in cold filter. */
@@ -81,6 +83,7 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
                 serverAssert(server.swap->hotmemory_policy == SWAP_HOTMEMORY_FLAG_LFU);
                 updateLFU(val);
             }
+            db->stat_total_lookup_count++;
             return val;
         }
         /* Key not found, return NULL. */

@@ -499,7 +499,7 @@ int cuckooFilterTest(int argc, char **argv, int accurate) {
     UNUSED(accurate);
     uint64_t capacity = 1000000;
     cuckooFilter ck;
-    cuckooFilterInit(&ck, capacity * sizeof(CuckooFingerprint), CF_DEFAULT_BUCKETSIZE, 500, 1);
+    cuckooFilterInit(&ck, capacity * sizeof(CuckooFingerprint), CF_DEFAULT_BUCKETSIZE, 500, 1, 0);
     assert(ck.numItems == 0);
     assert(ck.numFilters == 1);
 

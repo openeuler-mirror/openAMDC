@@ -714,16 +714,23 @@ typedef struct clientReplyBlock {
  * by integers from 0 (the default database) up to the max configured
  * database. The database number is the 'id' field in the structure. */
 typedef struct redisDb {
-    dict *dict;                 /* The keyspace for this DB */
-    dict *expires;              /* Timeout of keys with a timeout set */
-    dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
-    dict *ready_keys;           /* Blocked keys that received a PUSH */
-    dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
-    int id;                     /* Database ID */
-    long long avg_ttl;          /* Average TTL, just for stats */
-    unsigned long expires_cursor; /* Cursor of the active expire cycle. */
-    list *defrag_later;         /* List of key names to attempt to defrag one by one, gradually. */
-    size_t cold_data_size;      /* Cold data size (keys not in memory) */
+    dict *dict;                                  /* The keyspace for this DB */
+    dict *expires;                               /* Timeout of keys with a timeout set */
+    dict *blocking_keys;                         /* Keys with clients waiting for data (BLPOP)*/
+    dict *ready_keys;                            /* Blocked keys that received a PUSH */
+    dict *watched_keys;                          /* WATCHED keys for MULTI/EXEC CAS */
+    int id;                                      /* Database ID */
+    long long avg_ttl;                           /* Average TTL, just for stats */
+    unsigned long expires_cursor;                /* Cursor of the active expire cycle. */
+    list *defrag_later;                          /* List of key names to attempt to defrag one by one, gradually. */
+    size_t cold_data_size;                       /* Cold data size (keys not in memory) */
+    size_t stat_total_lookup_count;              /* Total request num */
+    size_t stat_hit_ram_count;                   /* Requests processed directly from RAM */
+    long long stat_swap_in_keys_total;           /* Total number of keys swapped in */
+    long long stat_swap_in_empty_keys_skipped;   /* Number of swap keys skipped due to being empty */
+    long long stat_swap_in_expired_keys_skipped; /* Number of swap keys skipped due to being expired */
+    long long stat_swap_out_keys_total;          /* Total number of keys swapped out */
+    long long stat_swap_del_keys_total;          /* Total number of keys deleted */ 
 } redisDb;
 
 /* Declare database backup that include openAMDC main DBs and slots to keys map.
@@ -1330,11 +1337,7 @@ struct redisServer {
     long long stat_dump_payload_sanitizations; /* Number deep dump payloads integrity validations. */
     redisAtomic long long stat_total_reads_processed; /* Total number of read events processed */
     redisAtomic long long stat_total_writes_processed; /* Total number of write events processed */
-    long long stat_swap_in_keys_total; /* Total number of keys swapped in */
-    long long stat_swap_in_empty_keys_skipped; /* Number of swap keys skipped due to being empty */
-    long long stat_swap_in_expired_keys_skipped; /* Number of swap keys skipped due to being expired */
-    long long stat_swap_out_keys_total; /* Total number of keys swapped out */
-    long long stat_swap_del_keys_total; /* Total number of keys deleted */ 
+
     /* The following two are used to track instantaneous metrics, like
      * number of operations per second, network traffic. */
     struct {
