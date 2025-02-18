@@ -382,7 +382,7 @@ static int cuckooFilterCompactSingle(cuckooFilter *filter, uint16_t filterIx) {
     }
     // we free a filter only if it the latest one
     if (rv == RELOC_OK && filterIx == filter->numFilters - 1) {
-        CUCKOO_FREE(filter);
+        CUCKOO_FREE(finger);
         filter->numFilters--;
     }
     return rv;
