@@ -6596,10 +6596,6 @@ int main(int argc, char **argv) {
     uint8_t hashseed[16];
     getRandomBytes(hashseed,sizeof(hashseed));
     dictSetHashFunctionSeed(hashseed);
-    if (server.swap_enabled) {
-        getRandomBytes(hashseed,sizeof(hashseed));
-        cuckooFilterSetHashFunctionSeed(hashseed);
-    }
     server.sentinel_mode = checkForSentinelMode(argc,argv);
     initServerConfig();
     ACLInit(); /* The ACL subsystem must be initialized ASAP because the

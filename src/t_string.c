@@ -603,7 +603,7 @@ void incrDecrCommand(client *c, long long incr) {
     }
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_STRING,"incrby",c->argv[1],c->db->id);
-    swapOut(c->argv[1], o, c->db->id);
+    swapOut(c->argv[1], new, c->db->id);
     server.dirty++;
     addReplyLongLong(c, value);
 }
@@ -657,7 +657,7 @@ void incrbyfloatCommand(client *c) {
         dbAdd(c->db,c->argv[1],new);
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_STRING,"incrbyfloat",c->argv[1],c->db->id);
-    swapOut(c->argv[1], o, c->db->id); 
+    swapOut(c->argv[1], new, c->db->id); 
     server.dirty++;
     addReplyBulk(c,new);
 

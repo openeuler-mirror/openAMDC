@@ -768,6 +768,7 @@ void swapThreadClose(void) {
 
 /* Initializes the swap state. */
 void swapInit(void) {
+    uint8_t hashseed[16];
     server.swap = zmalloc(sizeof(swapState));    
     server.swap->swap_data_version = 0;
     server.swap->hotmemory_policy = SWAP_HOTMEMORY_FLAG_LFU;
@@ -804,6 +805,10 @@ void swapInit(void) {
             server.swap->pending_entries[iel] = listCreate();
         }
     }
+    
+    /* Initialize hash seed. */
+    getRandomBytes(hashseed,sizeof(hashseed));
+    cuckooFilterSetHashFunctionSeed(hashseed);
 }
 
 /* Releases resources and performs cleanup operations related to the swap process. */
@@ -959,14 +964,15 @@ static void swapData(int intention, robj *key, robj *val, int dbid) {
     if (!server.swap_enabled) return;
 
     if (!server.swap_hotmemory) {
-        /* If the intention of the swap operation is to swap
-         * out, retrieve the expiration time of the key */
-        uint64_t version;
+        /* If the intention of the swap operation is to swap out. */
+        uint64_t version = 0;
         long long expire = -1;
-        if (intention == SWAP_OUT)
+        if (intention == SWAP_OUT) {
+            /* Retrieve the expiration time of the key. */
             expire = getExpire(server.db+dbid, key);
-        /* Retrieve the version of the object */
-        version = getVersion(val);
+            /* Retrieve the version of the object. */
+            version = getVersion(val);
+        }
         /* Create a swap data entry object, encapsulating
          * the relevant information for the swap operation */
         swapDataEntry *entry = swapDataEntryCreate(intention, dbid, key, val, expire, version);
@@ -1805,7 +1811,7 @@ int swapIterateGenerateRDB(rio *rdb, int rdbflags, int dbid, long key_count, siz
     if (!server.swap_enabled) return C_OK;
 
     swapDataRetrieval *r;
-    char *pname = (rdbflags & RDBFLAGS_AOF_PREAMBLE) ? "AOF rewrite" :  "RDB";
+    char *pname = (rdbflags & RDBFLAGS_AOF_PREAMBLE) ? "AOF rewrite" : "RDB";
     /* Create an iterator for the specified column family in the RocksDB database. */
     rocksdb_iterator_t *iter_snapshot =
         rocksdb_create_iterator_cf(server.swap->rocks->db,
