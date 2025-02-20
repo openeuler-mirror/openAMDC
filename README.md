@@ -267,5 +267,4 @@ Use cases are important for features to be accepted.
 To-Do List
 ----------
 
-*  Data swap architecture, openAMDC stores hot data and cold data in memory and RocksDB respectively, expands the storage capacity of openAMDC, and supports the automatic exchange and balance of memory data and SSD data.
 *  Compatibility Upgrade from redis 6.2 to redis 7.2.
