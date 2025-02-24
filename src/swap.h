@@ -54,6 +54,7 @@ typedef struct swapDataRetrieval {
 } swapDataRetrieval;
 
 swapDataRetrieval *swapDataRetrievalCreate(int dbid, robj *val, long long lfu_freq, long long expiretime, uint64_t version);
+swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len);
 void swapDataRetrievalRelease(swapDataRetrieval *r);
 
 typedef struct swapDataEntry {

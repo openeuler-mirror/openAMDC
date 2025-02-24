@@ -18,7 +18,6 @@
 #define MB (1024 * 1024)
 
 static sds swapDataEncodeObject(swapDataEntry *entry);
-static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len);
 static void swapDataEntryBatchFinished(swapDataEntryBatch *eb, int async);
 
 /* Initializes the RocksDB database. */
@@ -292,7 +291,7 @@ werr:
 }
 
 /* Decodes a serialized object from a buffer and adds it to the dict. */
-static swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len) {
+swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len) {
     rio payload;
     robj *val = NULL;
     swapDataRetrieval *r = NULL;
