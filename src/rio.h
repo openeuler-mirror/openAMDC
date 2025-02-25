@@ -159,6 +159,12 @@ size_t rioWriteBulkDouble(rio *r, double d);
 
 struct redisObject;
 int rioWriteBulkObject(rio *r, struct redisObject *obj);
+int rewriteListObject(rio *r, struct redisObject *key, struct redisObject *o);
+int rewriteSetObject(rio *r, struct redisObject *key, struct redisObject *o);
+int rewriteSortedSetObject(rio *r, struct redisObject *key, struct redisObject *o);
+int rewriteHashObject(rio *r, struct redisObject *key, struct redisObject *o);
+int rewriteStreamObject(rio *r, struct redisObject *key, struct redisObject *o);
+int rewriteModuleObject(rio *r, struct redisObject *key, struct redisObject *o);
 
 void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len);
 void rioSetAutoSync(rio *r, off_t bytes);

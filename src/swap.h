@@ -136,6 +136,7 @@ int overSwapHotmemoryAfterAlloc(size_t moremem);
 void swapStartGenerateRDB(void);
 int swapIterateGenerateRDB(rio *rdb, int rdbflags, int dbid, long key_count, size_t processed, long long info_updated_time);
 void swapStopGenerateRDB(void);
+int swapIterateGenerateAppendOnlyFile(rio *aof, int dbid, long key_count, size_t processed, long long updated_time);
 void swapProcessPendingEntries(int iel);
 
 #endif

@@ -1836,7 +1836,7 @@ int swapIterateGenerateRDB(rio *rdb, int rdbflags, int dbid, long key_count, siz
             continue;
         }
 
-        /* Decode the retrieved data， if decoding fails, free the allocated memory and return NULL. */
+        /* Decode the retrieved data，if decoding fails, free the allocated memory and return NULL. */
         if ((r = swapDataDecodeObject(&keyobj, val_buf, vlen)) == NULL) { 
             sdsfree(key);
             goto werr;
@@ -1904,6 +1904,107 @@ void swapStopGenerateRDB(void) {
     rocksdb_readoptions_set_snapshot(server.swap->rocks->ropts, NULL);
     /* Set the snapshot pointer to NULL. */
     server.swap->rocks->snapshot = NULL;
+}
+
+/* Iterates over the RocksDB cold data to generate an AOF file. */
+int swapIterateGenerateAppendOnlyFile(rio *aof, int dbid, long key_count, size_t processed, long long updated_time) {
+    if (!server.swap_enabled) return C_OK;
+
+    /* Create an iterator for the specified column family in the RocksDB database. */
+    rocksdb_iterator_t *iter =
+        rocksdb_create_iterator_cf(server.swap->rocks->db,
+                                   server.swap->rocks->ropts,
+                                   server.swap->rocks->cf_handles[DB_CF(dbid)]);
+    /* Iterate over all key-value pairs in the column family. */
+    for (rocksdb_iter_seek_to_first(iter);
+         rocksdb_iter_valid(iter);
+         rocksdb_iter_next(iter)) {
+        robj keyobj, *o;
+        long long expiretime;
+        swapDataRetrieval *r;
+        size_t klen, vlen;
+        /* Get the key and value from the iterator. */
+        char *key_buf = (char *)rocksdb_iter_key(iter, &klen);
+        char *val_buf = (char *)rocksdb_iter_value(iter, &vlen);
+        sds key = sdsnewlen(key_buf, klen);
+        initStaticStringObject(keyobj, key);
+
+        /* Check if the key is present in the Cuckoo filter. */
+        if (!cuckooFilterContains(&server.swap->cold_filter[dbid], key, sdslen(key))) {
+            sdsfree(key);
+            continue;
+        }
+
+        /* Decode the retrieved data，if decoding fails, free the allocated memory and return NULL. */
+        if ((r = swapDataDecodeObject(&keyobj, val_buf, vlen)) == NULL) { 
+            sdsfree(key);
+            goto werr;
+        } else {
+            o = r->val;
+            expiretime = r->expiretime;
+            swapDataRetrievalRelease(r);
+        }
+
+        /* Save the key and associated value */
+        if (o->type == OBJ_STRING) {
+            /* Emit a SET command */
+            char cmd[]="*3\r\n$3\r\nSET\r\n";
+            if (rioWrite(aof,cmd,sizeof(cmd)-1) == 0) goto werr;
+            /* Key and value */
+            if (rioWriteBulkObject(aof,&keyobj) == 0) goto werr;
+            if (rioWriteBulkObject(aof,o) == 0) goto werr;
+        } else if (o->type == OBJ_LIST) {
+            if (rewriteListObject(aof,&keyobj,o) == 0) goto werr;
+        } else if (o->type == OBJ_SET) {
+            if (rewriteSetObject(aof,&keyobj,o) == 0) goto werr;
+        } else if (o->type == OBJ_ZSET) {
+            if (rewriteSortedSetObject(aof,&keyobj,o) == 0) goto werr;
+        } else if (o->type == OBJ_HASH) {
+            if (rewriteHashObject(aof,&keyobj,o) == 0) goto werr;
+        } else if (o->type == OBJ_STREAM) {
+            if (rewriteStreamObject(aof,&keyobj,o) == 0) goto werr;
+        } else if (o->type == OBJ_MODULE) {
+            if (rewriteModuleObject(aof,&keyobj,o) == 0) goto werr;
+        } else {
+            serverPanic("Unknown object type");
+        }
+        /* Save the expire time */
+        if (expiretime != -1) {
+            WRAPPER_MUTEX_LOCK(el, &expireLock);
+            char cmd[]="*3\r\n$9\r\nPEXPIREAT\r\n";
+            if (rioWrite(aof,cmd,sizeof(cmd)-1) == 0) goto werr;
+            if (rioWriteBulkObject(aof,&keyobj) == 0) goto werr;
+            if (rioWriteBulkLongLong(aof,expiretime) == 0) goto werr;
+        }
+        /* Read some diff from the parent process from time to time. */
+        if (aof->processed_bytes > processed+AOF_READ_DIFF_INTERVAL_BYTES) {
+            processed = aof->processed_bytes;
+            aofReadDiffFromParent();
+        }
+
+        /* Update info every 1 second (approximately).
+         * in order to avoid calling mstime() on each iteration, we will
+         * check the diff every 1024 keys */
+        if ((key_count++ & 1023) == 0) {
+            long long now = mstime();
+            if (now - updated_time >= 1000) {
+                sendChildInfo(CHILD_INFO_TYPE_CURRENT_INFO, key_count, "AOF rewrite");
+                updated_time = now;
+            }
+        }
+        sdsfree(key);
+    }
+
+    /* Destroy the iterator. */
+    rocksdb_iter_destroy(iter);
+    iter = NULL;
+    return C_OK;
+
+werr:
+    /* If an error occurs, destroy the iterator and return an error. */
+    if (iter)
+        rocksdb_iter_destroy(iter);
+    return C_ERR;
 }
 
 /* Process pending swap data entries for a specific thread. */
