@@ -5663,6 +5663,35 @@ sds genRedisInfoString(const char *section) {
         "swap_enabled:%d\r\n",
         server.swap_enabled);
         if (server.swap_enabled) {
+            for (j = 0; j < server.dbnum; j++) {
+                long long keys, vkeys;
+
+                keys = dictSize(server.db[j].dict);
+                if (server.swap_enabled) keys += server.db[j].cold_data_size;
+                vkeys = dictSize(server.db[j].expires);
+                if (keys || vkeys) {
+                    cuckooFilterStat stat;
+                    cuckooFilterGetStat(&server.swap->cold_filter[j], &stat);
+                    info = sdscatprintf(info,
+                        "cuckoo_filter%d:"
+                        "cuckoo_filter_num_items:%ld,"
+                        "cuckoo_filter_num_deletes:%ld,"
+                        "cuckoo_filter_used_memory:%lu,"
+                        "cuckoo_filter_num_filters:%d,"
+                        "cuckoo_filter_bucket_size:%d,"
+                        "cuckoo_filter_max_iterations:%d,"
+                        "cuckoo_filter_load_factor:%lf\r\n",
+                        j,
+                        stat.numItems,
+                        stat.numDeletes,
+                        stat.used_memory,
+                        stat.numFilters,
+                        stat.bucketSize,
+                        stat.maxIterations,
+                        stat.load_factor);
+                }
+            }
+
             rocksdb_options_enable_statistics(server.swap->rocks->db_opts);
             char* rocks_stats = rocksdb_property_value(server.swap->rocks->db, "rocksdb.stats");
             if (rocks_stats != NULL) {

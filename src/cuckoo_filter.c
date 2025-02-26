@@ -417,7 +417,7 @@ void cuckooFilterGetStat(const cuckooFilter *filter, cuckooFilterStat *stat) {
         stat->used_memory += sizeof(CuckooFingerprint)*slots;
         total_slots += slots;
     }
-    stat->load_factor = (double)stat->numItems / total_slots;
+    stat->load_factor = total_slots == 0 ? 0 : (double)stat->numItems / total_slots;
 }
 
 /**
