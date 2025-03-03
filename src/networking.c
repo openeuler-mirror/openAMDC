@@ -3905,7 +3905,7 @@ void processEventsWhileBlocked(int iel) {
     listRelease(clients);
 }
 
-parsed* parsedCreate(int argc) {
+parsed *parsedCreate(int argc) {
     parsed *p = zmalloc(sizeof(parsed));
     p->argv = zmalloc(sizeof(robj*) * argc);
     p->argc = 0;

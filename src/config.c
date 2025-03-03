@@ -2328,6 +2328,19 @@ static int updateGoodSlaves(long long val, long long prev, const char **err) {
     return 1;
 }
 
+static int updateSwapFlushThreadsNum(long long val, long long prev, const char **err) {
+    UNUSED(err);
+    /* Do nothing if swap-flush-threads-num is unchanged */
+    if (val == prev) {
+        return 1;
+    }
+    server.swap_flush_threads_num = prev;
+    swapThreadClose();
+    server.swap_flush_threads_num = val;
+    swapThreadInit();
+    return 1;
+}
+
 static int updateAppendonly(int val, int prev, const char **err) {
     UNUSED(prev);
     if (val == 0 && server.aof_state != AOF_OFF) {
@@ -2821,8 +2834,8 @@ standardConfig configs[] = {
     createIntConfig("hz", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.config_hz, CONFIG_DEFAULT_HZ, INTEGER_CONFIG, NULL, updateHZ),
     createIntConfig("min-replicas-to-write", "min-slaves-to-write", MODIFIABLE_CONFIG, 0, INT_MAX, server.repl_min_slaves_to_write, 0, INTEGER_CONFIG, NULL, updateGoodSlaves),
     createIntConfig("min-replicas-max-lag", "min-slaves-max-lag", MODIFIABLE_CONFIG, 0, INT_MAX, server.repl_min_slaves_max_lag, 10, INTEGER_CONFIG, NULL, updateGoodSlaves),
-    createIntConfig("swap-flush-threads-num", NULL, IMMUTABLE_CONFIG, 0, 64, server.swap_flush_threads_num, 0, INTEGER_CONFIG, NULL, NULL),
-    createIntConfig("swap-data-entry-batch-size", NULL, IMMUTABLE_CONFIG, 1, 64, server.swap_data_entry_batch_size, 4, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("swap-flush-threads-num", NULL, MODIFIABLE_CONFIG, 0, 64, server.swap_flush_threads_num, 0, INTEGER_CONFIG, NULL, updateSwapFlushThreadsNum),
+    createIntConfig("swap-data-entry-batch-size", NULL, MODIFIABLE_CONFIG, 1, 64, server.swap_data_entry_batch_size, 4, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("swap-hotmemory-samples", NULL, MODIFIABLE_CONFIG, 1, INT_MAX, server.swap_hotmemory_samples, 5, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("swap-hotmemory-eviction-tenacity", NULL, MODIFIABLE_CONFIG, 0, 100, server.swap_hotmemory_eviction_tenacity, 10, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("swap-cuckoofilter-bucket-size", NULL, IMMUTABLE_CONFIG, 1, 64, server.swap_cuckoofilter_bucket_size, 4, INTEGER_CONFIG, NULL, NULL),

@@ -452,7 +452,8 @@ long long emptyDbStructure(redisDb *dbarray, int dbnum, int async,
             dictEmpty(dbarray[j].expires,callback);
         }
 
-        if (server.swap_enabled) {
+        if (server.swap_enabled && dbarray[j].cold_data_size) {
+            sds name;
             char *err = NULL;
             rocksdb_drop_column_family(server.swap->rocks->db, server.swap->rocks->cf_handles[DB_CF(j)], &err);
             if (err != NULL) {
@@ -460,6 +461,16 @@ long long emptyDbStructure(redisDb *dbarray, int dbnum, int async,
                 zlibc_free(err);
                 return -1;
             }
+            name = sdscatfmt(sdsempty(), "db%i", j);
+            server.swap->rocks->cf_handles[DB_CF(j)] =
+                rocksdb_create_column_family(server.swap->rocks->db, server.swap->rocks->db_opts, name, &err);
+            if (err != NULL) {
+                serverLog(LL_WARNING, "Failed to create column family: %s", err);
+                zlibc_free(err);
+                sdsfree(name);
+                return -1;
+            }
+            sdsfree(name);
             removed += dbarray[j].cold_data_size;
 
             cuckooFilterClear(&server.swap->cold_filter[j]);

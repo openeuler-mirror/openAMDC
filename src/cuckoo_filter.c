@@ -67,11 +67,13 @@ void cuckooFilterFree(cuckooFilter *filter) {
         CUCKOO_FREE(filter->tables[ii].data);
     }
     CUCKOO_FREE(filter->tables);
+    filter->tables = NULL;
+    filter->numFilters = 0;
 }
 
-void cuckooFilterClear(cuckooFilter *filter) {
+int cuckooFilterClear(cuckooFilter *filter) {
     cuckooFilterFree(filter);
-    filter->numFilters = 0;
+    return cuckooFilterGrow(filter);
 }
 
 static int cuckooFilterGrow(cuckooFilter *filter) {
