@@ -398,6 +398,7 @@ void getdelCommand(client *c) {
         rewriteClientCommandVector(c,2,shared.del,c->argv[1]);
         signalModifiedKey(c, c->db, c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_GENERIC, "del", c->argv[1], c->db->id);
+        swapDel(c->argv[1], c->db->id);
         server.dirty++;
     }
 }

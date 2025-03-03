@@ -1588,7 +1588,13 @@ long long getExpire(redisDb *db, robj *key) {
 
     /* The entry was found in the expire dict, this means it should also
      * be present in the main dict (safety check). */
-    serverAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
+    if (server.swap_enabled) {
+        int exists = dictFind(db->dict,key->ptr) != NULL || 
+            cuckooFilterContains(&server.swap->cold_filter[db->id],key->ptr,sdslen(key->ptr));
+        serverAssertWithInfo(NULL,key,exists);
+    } else {
+        serverAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
+    }
     return dictGetSignedIntegerVal(de);
 }
 
@@ -1603,6 +1609,7 @@ void deleteExpiredKeyAndPropagate(redisDb *db, robj *keyobj) {
     latencyEndMonitor(expire_latency);
     latencyAddSampleIfNeeded("expire-del",expire_latency);
     notifyKeyspaceEvent(NOTIFY_EXPIRED,"expired",keyobj,db->id);
+    swapDel(keyobj, db->id);
     signalModifiedKey(NULL, db, keyobj);
     propagateExpire(db,keyobj,server.lazyfree_lazy_expire);
     server.stat_expiredkeys++;

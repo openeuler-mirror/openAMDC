@@ -928,6 +928,8 @@ robj *swapIn(robj *key, int dbid) {
         cuckooFilterDelete(&server.swap->cold_filter[dbid], key->ptr, sdslen(key->ptr));
         server.db[dbid].cold_data_size--;
         server.db[dbid].stat_swap_in_expired_keys_skipped++;
+        zlibc_free(val);
+        return NULL;
     } else {
         /* Add the new object in the hash table. */
         sds copy = sdsdup(key->ptr);
@@ -947,13 +949,14 @@ robj *swapIn(robj *key, int dbid) {
 
         /* Set the version of the object. */
         setVersion(o, version);
-    }
 
-    zlibc_free(val);
-    latencyEndMonitor(swap_latency);
-    latencyAddSampleIfNeeded("swap-in", swap_latency);
-    server.db[dbid].stat_swap_in_keys_total++;
-    return o;
+        /* End monitoring the latency and add the sample to the latency monitor */
+        latencyEndMonitor(swap_latency);
+        latencyAddSampleIfNeeded("swap-in", swap_latency);
+        server.db[dbid].stat_swap_in_keys_total++;
+        zlibc_free(val);
+        return o;
+    }
 }
 
 /* A general function to attempt data swapping. */
