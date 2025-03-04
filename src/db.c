@@ -760,8 +760,12 @@ void delGenericCommand(client *c, int lazy) {
 
     for (j = 1; j < c->argc; j++) {
         expireIfNeeded(c->db,c->argv[j]);
-        int deleted  = lazy ? dbAsyncDelete(c->db,c->argv[j]) :
+        int deleted = lazy ? dbAsyncDelete(c->db,c->argv[j]) :
                               dbSyncDelete(c->db,c->argv[j]);
+        deleted |= server.swap_enabled &&
+            cuckooFilterContains(&server.swap->cold_filter[c->db->id],
+                                 c->argv[j]->ptr,
+                                 sdslen(c->argv[j]->ptr));
         if (deleted) {
             signalModifiedKey(c,c->db,c->argv[j]);
             notifyKeyspaceEvent(NOTIFY_GENERIC,

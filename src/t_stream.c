@@ -3270,6 +3270,7 @@ void xtrimCommand(client *c) {
     int64_t deleted = streamTrim(s, &parsed_args);
     if (deleted) {
         notifyKeyspaceEvent(NOTIFY_STREAM,"xtrim",c->argv[1],c->db->id);
+        swapOut(c->argv[1], o, c->db->id);
         if (parsed_args.approx_trim) {
             /* In case our trimming was limited (by LIMIT or by ~) we must
              * re-write the relevant trim argument to make sure there will be
