@@ -3915,6 +3915,7 @@ void genericZpopCommand(client *c, robj **keyv, int keyc, int where, int emitkey
         if (result_count == 0) { /* Do this only for the first iteration. */
             char *events[2] = {"zpopmin","zpopmax"};
             notifyKeyspaceEvent(NOTIFY_ZSET,events[where],key,c->db->id);
+            swapOut(key, zobj, c->db->id);
             signalModifiedKey(c,c->db,key);
         }
 
@@ -3930,6 +3931,7 @@ void genericZpopCommand(client *c, robj **keyv, int keyc, int where, int emitkey
         if (zsetLength(zobj) == 0) {
             dbDelete(c->db,key);
             notifyKeyspaceEvent(NOTIFY_GENERIC,"del",key,c->db->id);
+            swapDel(key, c->db->id);
             break;
         }
     } while(--count);

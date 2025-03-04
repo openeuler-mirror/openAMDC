@@ -543,6 +543,12 @@ static void swapDataEntryBatchFinished(swapDataEntryBatch *eb, int async) {
             }
             /* Move the key out of memory according to the swap-out policy. */
             swapMoveKeyOutOfMemory(entry, async);
+        } else if (entry->intention == SWAP_DEL) {
+            if (!cuckooFilterDelete(&server.swap->cold_filter[entry->dbid],
+                                    entry->key->ptr, 
+                                    sdslen(entry->key->ptr))) {
+                serverLog(LL_WARNING, "Cuckoo filter delete failed, key:%s", (sds)entry->key->ptr);
+            }
         }
     }
 }
