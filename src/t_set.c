@@ -637,7 +637,7 @@ void spopCommand(client *c) {
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
         swapDel(c->argv[1], c->db->id); 
     } else {
-        swapOut(c->argv[1], ele, c->db->id);
+        swapOut(c->argv[1], set, c->db->id);
     }
 
     /* Set has been modified */
