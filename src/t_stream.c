@@ -2348,7 +2348,7 @@ void xgroupCommand(client *c) {
     streamCG *cg = NULL;
     char *opt = c->argv[1]->ptr; /* Subcommand name. */
     int mkstream = 0;
-    robj *o;
+    robj *o = NULL;
 
     /* CREATE has an MKSTREAM option that creates the stream if it
      * does not exist. */

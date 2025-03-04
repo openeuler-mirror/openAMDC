@@ -296,7 +296,7 @@ swapDataRetrieval *swapDataDecodeObject(robj *key, char *buf, size_t len) {
     robj *val = NULL;
     swapDataRetrieval *r = NULL;
     int type, error;
-    uint64_t version, dbid = 0;
+    uint64_t version = 0, dbid = 0;
     long long lfu_freq = -1, expiretime = -1;
     rioInitWithCBuffer(&payload, buf, len);
     while (1) {
