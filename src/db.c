@@ -710,7 +710,11 @@ void flushAllDataAndResetRDB(int flags) {
         int saved_dirty = server.dirty;
         rdbSaveInfo rsi, *rsiptr;
         rsiptr = rdbPopulateSaveInfo(&rsi);
-        rdbSave(server.rdb_filename,rsiptr);
+        if (server.swap_enabled) {
+            swapHotmemorySave();
+        } else {
+            rdbSave(server.rdb_filename,rsiptr);
+        }
         server.dirty = saved_dirty;
     }
 
