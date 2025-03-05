@@ -1195,6 +1195,8 @@ int swapHotMemoryLoad(void) {
             /* Convert the value and set the swap data version. */
             if (string2ll(val_buf, vlen, &swap_data_version) == 0) goto cleanup;
             setGblVersion(swap_data_version);
+        } else if (!strncmp(key_buf, "cuckoo_filter_seed", 18)) {
+            cuckooFilterSetHashFunctionSeed((uint8_t *)val_buf);
         } else if (strstr(key_buf, "cuckoo_filter")) {
             /* Load the cuckoo filter from RocksDB for each database. */
             int count;
@@ -1425,7 +1427,7 @@ int swapHotmemorySave(void) {
     if (!server.swap_enabled) return C_ERR;
     
     sds buf = NULL;
-    size_t len;
+    size_t len, seed_size;
     char *cf_buf = NULL;
     char *err = NULL;
     swapDataEntry *entry = NULL;
@@ -1433,6 +1435,7 @@ int swapHotmemorySave(void) {
     sds cold_data_size = NULL;
     sds swap_data_version = NULL;
     sds dbnum = NULL;
+    uint8_t *seed;
     dictEntry *de;
     dictIterator *di = NULL;
 
@@ -1514,13 +1517,13 @@ int swapHotmemorySave(void) {
         name = sdscatprintf(name, "#%d", i);
         cold_data_size = sdsfromlonglong(db->cold_data_size);
         rocksdb_put_cf(server.swap->rocks->db,
-                    server.swap->rocks->wopts,
-                    server.swap->rocks->cf_handles[META_CF],
-                    name,
-                    sdslen(name),
-                    cold_data_size,
-                    sdslen(cold_data_size),
-                    &err);
+                       server.swap->rocks->wopts,
+                       server.swap->rocks->cf_handles[META_CF],
+                       name,
+                       sdslen(name),
+                       cold_data_size,
+                       sdslen(cold_data_size),
+                       &err);
         if (err != NULL) {
             serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
             goto cleanup;
@@ -1565,6 +1568,22 @@ int swapHotmemorySave(void) {
     }
     sdsfree(name); name = NULL;
     sdsfree(swap_data_version); swap_data_version = NULL;
+
+    name = sdsnew("cuckoo_filter_seed");
+    seed = GetCuckooFilterHashFunctionSeed(&seed_size);
+    rocksdb_put_cf(server.swap->rocks->db,
+                   server.swap->rocks->wopts,
+                   server.swap->rocks->cf_handles[META_CF],
+                   name,
+                   sdslen(name),
+                   (char *)seed,
+                   seed_size,
+                   &err);
+    if (err != NULL) {
+        serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
+        goto cleanup;
+    }
+    sdsfree(name); name = NULL;
 
     return C_OK;
 

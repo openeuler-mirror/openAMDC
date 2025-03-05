@@ -93,6 +93,7 @@ char *cuckooFilterEncodeChunk(cuckooFilter *filter, size_t *len);
 cuckooFilter cuckooFilterDecodeChunk(const char *buf, size_t len);
 int cuckooFilterValidateIntegrity(const cuckooFilter *filter);
 void cuckooFilterSetHashFunctionSeed(uint8_t *seed);
+uint8_t *GetCuckooFilterHashFunctionSeed(size_t *size);
 
 #ifdef REDIS_TEST
 int cuckooFilterTest(int argc, char *argv[], int accurate);
