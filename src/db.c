@@ -868,6 +868,10 @@ void keysCommand(client *c) {
             size_t klen;
             char *key_buf = (char *)rocksdb_iter_key(iter, &klen);
 
+            if (!cuckooFilterContains(&server.swap->cold_filter[c->db->id], key_buf, klen)) {
+                continue;
+            }
+
             if (allkeys || stringmatchlen(pattern,plen,key_buf,klen,0)) {
                 keyobj = createStringObject(key_buf,klen);
                 if (!keyIsExpired(c->db,keyobj)) {
