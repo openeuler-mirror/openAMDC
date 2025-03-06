@@ -3566,7 +3566,6 @@ void initServer(void) {
     }
 
     if (server.cluster_enabled) clusterInit();
-    if (server.swap_enabled) swapInit();
     replicationScriptCacheInit();
     scriptingInit(1);
     slowlogInit();
@@ -3583,6 +3582,7 @@ void initServer(void) {
  * see: https://sourceware.org/bugzilla/show_bug.cgi?id=19329 */
 void InitServerLast() {
     bioInit();
+    if (server.swap_enabled) swapInit();
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
     server.initial_memory_usage = zmalloc_used_memory();
 }
