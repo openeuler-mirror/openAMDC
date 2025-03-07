@@ -2158,7 +2158,10 @@ void xreadCommand(client *c) {
             streamReplyWithRange(c,s,&start,NULL,count,0,
                                  groups ? groups[i] : NULL,
                                  consumer, flags, &spi);
-            if (groups) server.dirty++;
+            if (groups) {
+                server.dirty++;
+                swapOut(c->argv[streams_arg+i], o, c->db->id);
+            }
         }
     }
 
@@ -2577,6 +2580,7 @@ void xackCommand(client *c) {
             streamFreeNACK(nack);
             acknowledged++;
             server.dirty++;
+            swapOut(c->argv[1], o, c->db->id);
         }
     }
     addReplyLongLong(c,acknowledged);
@@ -3019,11 +3023,13 @@ void xclaimCommand(client *c) {
             streamPropagateXCLAIM(c,c->argv[1],group,c->argv[2],c->argv[j],nack);
             propagate_last_id = 0; /* Will be propagated by XCLAIM itself. */
             server.dirty++;
+            swapOut(c->argv[1], o, c->db->id);
         }
     }
     if (propagate_last_id) {
         streamPropagateGroupID(c,c->argv[1],group,c->argv[2]);
         server.dirty++;
+        swapOut(c->argv[1], o, c->db->id);
     }
     setDeferredArrayLen(c,arraylenptr,arraylen);
     preventCommandPropagation(c);
@@ -3168,6 +3174,7 @@ void xautoclaimCommand(client *c) {
         streamPropagateXCLAIM(c,c->argv[1],group,c->argv[2],idstr,nack);
         decrRefCount(idstr);
         server.dirty++;
+        swapOut(c->argv[1], o, c->db->id);
     }
 
     /* We need to return the next entry as a cursor for the next XAUTOCLAIM call */
