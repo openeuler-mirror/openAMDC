@@ -1569,6 +1569,7 @@ int swapHotmemorySave(void) {
     sdsfree(name); name = NULL;
     sdsfree(swap_data_version); swap_data_version = NULL;
 
+    /* Save the cuckoo filter seed to RocksDB. */
     name = sdsnew("cuckoo_filter_seed");
     seed = GetCuckooFilterHashFunctionSeed(&seed_size);
     rocksdb_put_cf(server.swap->rocks->db,

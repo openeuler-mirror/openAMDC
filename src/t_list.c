@@ -433,9 +433,9 @@ void listElementsRemoved(client *c, robj *key, int where, robj *o, long count) {
     if (listTypeLength(o) == 0) {
         notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, c->db->id);
         dbDelete(c->db, key);
-        swapDel(c->argv[1], c->db->id);
+        swapDel(key, c->db->id);
     } else if (count) {
-        swapOut(c->argv[1], o, c->db->id);
+        swapOut(key, o, c->db->id);
     }
     signalModifiedKey(c, c->db, key);
     server.dirty += count;
@@ -724,11 +724,13 @@ void lremCommand(client *c) {
     if (removed) {
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_LIST,"lrem",c->argv[1],c->db->id);
+        swapOut(c->argv[1], subject, c->db->id);
     }
 
     if (listTypeLength(subject) == 0) {
         dbDelete(c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
+        swapDel(c->argv[1], c->db->id);
     }
 
     addReplyLongLong(c,removed);
@@ -806,6 +808,8 @@ void lmoveGenericCommand(client *c, int wherefrom, int whereto) {
             notifyKeyspaceEvent(NOTIFY_GENERIC,"del",
                                 touchedkey,c->db->id);
             swapDel(touchedkey, c->db->id);
+        } else {
+            swapOut(touchedkey, sobj, c->db->id);
         }
         signalModifiedKey(c,c->db,touchedkey);
         server.dirty++;
