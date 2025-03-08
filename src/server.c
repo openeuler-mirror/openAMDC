@@ -5578,6 +5578,7 @@ sds genRedisInfoString(const char *section) {
         }
         dictReleaseIterator(di);
     }
+
     /* Error statistics */
     if (allsections || defsections || !strcasecmp(section,"errorstats")) {
         if (sections++) info = sdscat(info,"\r\n");
@@ -5624,11 +5625,11 @@ sds genRedisInfoString(const char *section) {
                     info = sdscatprintf(info,
                         "db%d:keys=%lld,expires=%lld,avg_ttl=%lld,"
                         "keys_in_ram_radio=%.2f%%,ram_hit_radio=%.2f%%,"
-                        "stat_swap_in_keys_total:%lld,"
-                        "stat_swap_in_empty_keys_skipped:%lld,"
-                        "stat_swap_in_expired_keys_skipped:%lld,"
-                        "stat_swap_out_keys_total:%lld,"
-                        "stat_swap_del_keys_total:%lld\r\n",
+                        "swap_in_keys_total:%lld,"
+                        "swap_in_empty_keys_skipped:%lld,"
+                        "swap_in_expired_keys_skipped:%lld,"
+                        "swap_out_keys_total:%lld,"
+                        "swap_del_keys_total:%lld\r\n",
                         j, keys, vkeys, server.db[j].avg_ttl,
                         keys_in_ram_radio, ram_hit_radio,
                         server.db[j].stat_swap_in_keys_total,
@@ -5659,10 +5660,29 @@ sds genRedisInfoString(const char *section) {
     if (allsections || defsections || !strcasecmp(section,"swap")) {
         if (sections++) info = sdscat(info,"\r\n");
         info = sdscatprintf(info,
-        "# Swap\r\n"
-        "swap_enabled:%d\r\n",
-        server.swap_enabled);
+            "# Swap\r\n"
+            "swap_enabled:%d\r\n",
+            server.swap_enabled);
+
         if (server.swap_enabled) {
+            info = sdscatprintf(info,
+                "swap-flush-threads-num:%d\r\n"
+                "swap-data-entry-batch-size:%d\r\n"
+                "swap-hotmemory:%lld\r\n"
+                "swap-hotmemory-samples:%d\r\n"
+                "swap-hotmemory-eviction-tenacity:%d\r\n"
+                "swap-cuckoofilter-size-for-level:%lld\r\n"
+                "swap-cuckoofilter-bucket-size:%d\r\n"
+                "swap-purge-rocksdb-after-load:%d\r\n",
+                server.swap_flush_threads_num,
+                server.swap_data_entry_batch_size,
+                server.swap_hotmemory,
+                server.swap_hotmemory_samples,
+                server.swap_hotmemory_eviction_tenacity,
+                server.swap_cuckoofilter_size_for_level,
+                server.swap_cuckoofilter_bucket_size,
+                server.swap_purge_rocksdb_after_load);
+
             for (j = 0; j < server.dbnum; j++) {
                 long long keys, vkeys;
 
