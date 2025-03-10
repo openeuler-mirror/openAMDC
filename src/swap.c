@@ -444,6 +444,7 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
     char *err = NULL;
     mstime_t swap_latency;
     cuckooFilter filter;
+    rocksdb_writebatch_t *batch;
 
     /* Initialize the Cuckoo Filter if there are multiple entries in the batch. */
     if (eb->count > 1 &&
@@ -456,6 +457,8 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
         return C_ERR;
     }
 
+    /* Create a rocksdb write batch. */
+    batch = rocksdb_writebatch_create();
     /* Start monitoring the latency for the swap-batch operation. */
     latencyStartMonitor(swap_latency);
 
@@ -474,38 +477,24 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
                 serverLog(LL_WARNING, "Swap data encode object failed, key:%s", (sds)entry->key->ptr);
                 goto cleanup;
             }
-            /* Write the encoded object to the RocksDB. */
-            rocksdb_put_cf(server.swap->rocks->db,
-                           server.swap->rocks->wopts,
-                           server.swap->rocks->cf_handles[DB_CF(entry->dbid)],
-                           entry->key->ptr,
-                           sdslen(entry->key->ptr),
-                           buf,
-                           sdslen(buf),
-                           &err);
-            if (err != NULL) {
-                serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
-                zlibc_free(err);
-                goto cleanup;
-            }
+            /* Write the encoded object to the rocksdb batch. */
+            rocksdb_writebatch_put_cf(batch,
+                                      server.swap->rocks->cf_handles[DB_CF(entry->dbid)],
+                                      entry->key->ptr,
+                                      sdslen(entry->key->ptr),
+                                      buf,
+                                      sdslen(buf));
             /* Free the encoded buffer. */
             sdsfree(buf);
             /* Increment the total count of swap out keys in the swap statistics. */
             server.db[entry->dbid].stat_swap_out_keys_total++;
         /* Handle entries with intention to delete. */
         } else if (entry->intention == SWAP_DEL) {
-            /* Delete the key from RocksDB. */
-            rocksdb_delete_cf(server.swap->rocks->db,
-                              server.swap->rocks->wopts,
-                              server.swap->rocks->cf_handles[DB_CF(entry->dbid)],
-                              entry->key->ptr,
-                              sdslen(entry->key->ptr),
-                              &err);
-            if (err != NULL) {
-                serverLog(LL_WARNING, "Rocksdb delete failed, err:%s", err);
-                zlibc_free(err);
-                goto cleanup;
-            }
+            /* Delete the key from rocksdb batch. */
+            rocksdb_writebatch_delete_cf(batch,
+                                         server.swap->rocks->cf_handles[DB_CF(entry->dbid)],
+                                         entry->key->ptr,
+                                         sdslen(entry->key->ptr));
             /* Increment the total count of deleted keys in the swap statistics. */
             server.db[entry->dbid].stat_swap_del_keys_total++;
         } else {
@@ -517,14 +506,27 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
         }
     }
 
+    /* Write the batch to rocksdb. */
+    rocksdb_write(server.swap->rocks->db,
+                  server.swap->rocks->wopts,
+                  batch,
+                  &err);
+    if (err != NULL) {
+        serverLog(LL_WARNING, "Rocksdb write batch failed, err:%s", err);
+        zlibc_free(err);
+        goto cleanup;
+    }
+
     latencyEndMonitor(swap_latency);
     latencyAddSampleIfNeeded("swap-batch", swap_latency);
     if (eb->count > 1) cuckooFilterFree(&filter);
+    rocksdb_writebatch_destroy(batch);
     return C_OK;
 
 cleanup:
     if (buf != NULL) sdsfree(buf);
     if (eb->count > 1) cuckooFilterFree(&filter);
+    rocksdb_writebatch_destroy(batch);
     return C_ERR;
 }
 
