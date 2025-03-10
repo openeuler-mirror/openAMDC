@@ -1574,13 +1574,15 @@ int removeExpire(redisDb *db, robj *key) {
 void setExpire(client *c, redisDb *db, robj *key, long long when) {
     serverAssert(threadOwnLock());
     dictEntry *kde, *de;
+    sds expirekey;
 
     {   
         /* Reuse the sds from the main dict in the expire dict */
         WRAPPER_MUTEX_LOCK(gl, &globalLock);
         kde = dictFind(db->dict,key->ptr);
         serverAssertWithInfo(NULL,key,kde != NULL);
-        de = dictAddOrFind(db->expires,dictGetKey(kde));
+        expirekey = server.swap_enabled ? sdsdup(dictGetKey(kde)) : dictGetKey(kde);
+        de = dictAddOrFind(db->expires,expirekey);
         dictSetSignedIntegerVal(de,when);
     }
 
@@ -1621,7 +1623,10 @@ void deleteExpiredKeyAndPropagate(redisDb *db, robj *keyobj) {
     latencyEndMonitor(expire_latency);
     latencyAddSampleIfNeeded("expire-del",expire_latency);
     notifyKeyspaceEvent(NOTIFY_EXPIRED,"expired",keyobj,db->id);
-    swapDel(keyobj, db->id);
+    if (server.swap_enabled) {
+        swapDataEntry *entry = swapDataEntryCreate(SWAP_DEL, db->id, keyobj, NULL, -1, 0);
+        swapDataEntrySubmit(entry, -1, 1);
+    }
     signalModifiedKey(NULL, db, keyobj);
     propagateExpire(db,keyobj,server.lazyfree_lazy_expire);
     server.stat_expiredkeys++;
