@@ -1563,7 +1563,13 @@ void swapdbCommand(client *c) {
 int removeExpire(redisDb *db, robj *key) {
     /* An expire may only be removed if there is a corresponding entry in the
      * main dict. Otherwise, the key will never be freed. */
-    serverAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
+    if (server.swap_enabled) {
+        int exists = dictFind(db->dict,key->ptr) != NULL || 
+            cuckooFilterContains(&server.swap->cold_filter[db->id],key->ptr,sdslen(key->ptr));
+        serverAssertWithInfo(NULL,key,exists);
+    } else {
+        serverAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
+    }
     return dictDelete(db->expires,key->ptr) == DICT_OK;
 }
 
@@ -1573,17 +1579,29 @@ int removeExpire(redisDb *db, robj *key) {
  * after which the key will no longer be considered valid. */
 void setExpire(client *c, redisDb *db, robj *key, long long when) {
     serverAssert(threadOwnLock());
-    dictEntry *kde, *de;
-    sds expirekey;
+    dictEntry *kde, *de, *existing;
 
     {   
         /* Reuse the sds from the main dict in the expire dict */
         WRAPPER_MUTEX_LOCK(gl, &globalLock);
-        kde = dictFind(db->dict,key->ptr);
-        serverAssertWithInfo(NULL,key,kde != NULL);
-        expirekey = server.swap_enabled ? sdsdup(dictGetKey(kde)) : dictGetKey(kde);
-        de = dictAddOrFind(db->expires,expirekey);
-        dictSetSignedIntegerVal(de,when);
+
+        if (server.swap_enabled) {
+            serverAssertWithInfo(NULL,key, dictFind(db->dict,key->ptr) != NULL ||
+                cuckooFilterContains(&server.swap->cold_filter[db->id],key->ptr,sdslen(key->ptr)));
+            de = dictAddRaw(db->expires, key->ptr, &existing);
+            if (de) {
+                sds copy = sdsdup(key->ptr);
+                dictSetKey(db->expires, de, copy);
+                dictSetSignedIntegerVal(de, when);
+            } else {
+                dictSetSignedIntegerVal(existing, when);
+            }
+        } else {
+            kde = dictFind(db->dict,key->ptr);
+            serverAssertWithInfo(NULL,key,kde != NULL);
+            de = dictAddOrFind(db->expires,dictGetKey(kde));
+            dictSetSignedIntegerVal(de,when);
+        }
     }
 
     int writable_slave = server.masterhost && server.repl_slave_ro == 0;

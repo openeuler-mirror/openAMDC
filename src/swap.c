@@ -933,7 +933,7 @@ robj *swapIn(robj *key, int dbid) {
             return NULL;
         }
         /* Remove the key from the expire dict. */
-        dictDelete(server.db[dbid].expires, key->ptr);
+        removeExpire(server.db+dbid, key);
         /* Remove the key from the cold filter. */
         cuckooFilterDelete(&server.swap->cold_filter[dbid], key->ptr, sdslen(key->ptr));
         server.db[dbid].cold_data_size--;
