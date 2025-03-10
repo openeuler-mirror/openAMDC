@@ -921,6 +921,7 @@ robj *swapIn(robj *key, int dbid) {
     if (iAmMaster() &&
         expiretime != -1 && expiretime < mstime()) {
         decrRefCount(o);
+        /* Delete the key from RocksDB. */
         rocksdb_delete_cf(server.swap->rocks->db,
                           server.swap->rocks->wopts,
                           server.swap->rocks->cf_handles[DB_CF(dbid)],
@@ -931,6 +932,8 @@ robj *swapIn(robj *key, int dbid) {
             serverLog(LL_WARNING, "Rocksdb delete key error, key:%s, err: %s", (sds)key->ptr, err);
             return NULL;
         }
+        /* Remove the key from the expire dict. */
+        dictDelete(server.db[dbid].expires, key->ptr);
         /* Remove the key from the cold filter. */
         cuckooFilterDelete(&server.swap->cold_filter[dbid], key->ptr, sdslen(key->ptr));
         server.db[dbid].cold_data_size--;
@@ -944,11 +947,6 @@ robj *swapIn(robj *key, int dbid) {
         if (!added) {
             serverLog(LL_WARNING,"Rocksdb has duplicated key '%s' in DB %d",(sds)key->ptr,dbid);
             serverPanic("Duplicated key found in Rocksdb");
-        }
-
-        /* Set the expire time if needed. */
-        if (expiretime != -1) {
-            setExpire(NULL, server.db+dbid, key, expiretime);
         }
 
         /* Set usage information (for swap). */
