@@ -681,6 +681,7 @@ void appendCommand(client *c) {
         dbAdd(c->db,c->argv[1],c->argv[2]);
         incrRefCount(c->argv[2]);
         totlen = stringObjectLen(c->argv[2]);
+        o = c->argv[2];
     } else {
         /* Key exists, check type */
         if (checkType(c,o,OBJ_STRING))
