@@ -904,6 +904,10 @@ robj *swapIn(robj *key, int dbid) {
         return NULL;
     }
 
+    /* Handle the case where the value is NULL, indicating that the key is a false positive
+     * example in the cuckoo filter.*/
+    if (val == NULL) return NULL;
+
     /* Decode the retrieved data， if decoding fails, free the allocated memory and return NULL. */
     if ((r = swapDataDecodeObject(key, val, vallen)) == NULL) { 
         zlibc_free(val);
