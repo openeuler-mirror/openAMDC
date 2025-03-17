@@ -165,7 +165,7 @@ openAMDC 默认会以用户友好的彩色输出进行构建。如果你想看�
     % ./openamdc-server --port 9999 --replicaof 127.0.0.1 6379
     % ./openamdc-server /etc/openamdc/6379.conf --loglevel debug
 
-redis.conf中的所有选项也都可以作为命令行选项，名称完全相同。
+openamdc.conf中的所有选项也都可以作为命令行选项，名称完全相同。
 
 使用TLS运行openAMDC：
 ------------------
