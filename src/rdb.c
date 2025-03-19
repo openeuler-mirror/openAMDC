@@ -63,8 +63,8 @@ void rdbReportError(int corruption_error, int linenum, char *reason, ...) {
     } else if (rdbFileBeingLoaded) {
         /* If we're loading an rdb file form disk, run rdb check (and exit) */
         serverLog(LL_WARNING, "%s", msg);
-        char *argv[2] = {"",rdbFileBeingLoaded};
-        redis_check_rdb_main(2,argv,NULL);
+        char *argv[3] = {"","--check-rdb",rdbFileBeingLoaded};
+        redis_check_rdb_main(3,argv,NULL);
     } else if (corruption_error) {
         /* In diskless loading, in case of corrupt file, log and exit. */
         serverLog(LL_WARNING, "%s. Failure loading rdb format", msg);

@@ -350,8 +350,12 @@ err:
 int redis_check_rdb_main(int argc, char **argv, FILE *fp) {
     struct timeval tv;
 
-    if (argc != 2 && fp == NULL) {
-        fprintf(stderr, "Usage: %s <rdb-file-name>\n", argv[0]);
+    if (argc != 3 && fp == NULL) {
+        fprintf(stderr, "Usage: %s --check-rdb <rdb-file-name>\n", argv[0]);
+        exit(1);
+    }
+    if (!(strcmp(argv[1],"--check-rdb") || strcmp(argv[1],"--check-aof"))) {
+        printf("Invalid argument: %s\n", argv[1]);
         exit(1);
     }
 
@@ -366,9 +370,9 @@ int redis_check_rdb_main(int argc, char **argv, FILE *fp) {
     server.loading_process_events_interval_bytes = 0;
     server.sanitize_dump_payload = SANITIZE_DUMP_YES;
     rdbCheckMode = 1;
-    rdbCheckInfo("Checking RDB file %s", argv[1]);
+    rdbCheckInfo("Checking RDB file %s", argv[2]);
     rdbCheckSetupSignals();
-    int retval = redis_check_rdb(argv[1],fp);
+    int retval = redis_check_rdb(argv[2],fp);
     if (retval == 0) {
         rdbCheckInfo("\\o/ RDB looks OK! \\o/");
         rdbShowGenericInfo();

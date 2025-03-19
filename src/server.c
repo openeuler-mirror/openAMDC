@@ -6320,6 +6320,28 @@ int checkForSentinelMode(int argc, char **argv) {
     return 0;
 }
 
+/* Returns 1 if there is --check-rdb among the arguments or if
+ * argv[0] contains "check-rdb". */
+int checkForRDBMode(int argc, char **argv) {
+    int j;
+
+    if (strstr(argv[0],"openamdc-check-rdb") != NULL) return 1;
+    for (j = 1; j < argc; j++)
+        if (!strcmp(argv[j],"--check-rdb")) return 1;
+    return 0;
+}
+
+/* Returns 1 if there is --check-rdb among the arguments or if
+ * argv[0] contains "check-rdb". */
+int checkForAOFMode(int argc, char **argv) {
+    int j;
+
+    if (strstr(argv[0],"openamdc-check-aof") != NULL) return 1;
+    for (j = 1; j < argc; j++)
+        if (!strcmp(argv[j],"--check-aof")) return 1;
+    return 0;
+}
+
 /* Function called at startup to load RDB or AOF or rocksdb file in memory. */
 void loadDataFromDisk(void) {
     long long start = ustime();
@@ -6670,9 +6692,9 @@ int main(int argc, char **argv) {
     /* Check if we need to start in openamdc-check-rdb/aof mode. We just execute
      * the program main. However the program is part of the openAMDC executable
      * so that we can easily execute an RDB check on loading errors. */
-    if (strstr(argv[0],"openamdc-check-rdb") != NULL)
+    if (checkForRDBMode(argc, argv))
         redis_check_rdb_main(argc,argv,NULL);
-    else if (strstr(argv[0],"openamdc-check-aof") != NULL)
+    else if (checkForAOFMode(argc, argv))
         redis_check_aof_main(argc,argv);
 
     if (argc >= 2) {

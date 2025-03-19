@@ -294,16 +294,13 @@ QUIET_INSTALL = @printf '    %b %b\n' $(LINKCOLOR)INSTALL$(ENDCOLOR) $(BINCOLOR)
 endif
 
 OPENAMDC_SERVER_NAME=openamdc-server$(PROG_SUFFIX)
-OPENAMDC_SENTINEL_NAME=openamdc-sentinel$(PROG_SUFFIX)
 OPENAMDC_SERVER_OBJ=adlist.o quicklist.o ae.o anet.o dict.o server.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o release.o networking.o util.o object.o db.o replication.o rdb.o t_string.o t_list.o t_set.o t_zset.o t_hash.o config.o aof.o pubsub.o multi.o debug.o sort.o intset.o syncio.o cluster.o crc16.o endianconv.o slowlog.o scripting.o bio.o rio.o rand.o memtest.o crcspeed.o crc64.o bitops.o sentinel.o notify.o setproctitle.o blocked.o hyperloglog.o latency.o sparkline.o openamdc-check-rdb.o openamdc-check-aof.o geo.o lazyfree.o module.o evict.o expire.o geohash.o geohash_helper.o childinfo.o defrag.o siphash.o rax.o t_stream.o listpack.o localtime.o lolwut.o lolwut5.o lolwut6.o acl.o gopher.o tracking.o connection.o tls.o sha256.o timeout.o setcpuaffinity.o monotonic.o mt19937-64.o mutex.o swap.o cuckoo_filter.o
 OPENAMDC_CLI_NAME=openamdc-cli$(PROG_SUFFIX)
 OPENAMDC_CLI_OBJ=anet.o adlist.o dict.o openamdc-cli.o zmalloc.o release.o ae.o crcspeed.o crc64.o siphash.o crc16.o monotonic.o cli_common.o mt19937-64.o mutex.o
 OPENAMDC_BENCHMARK_NAME=openamdc-benchmark$(PROG_SUFFIX)
 OPENAMDC_BENCHMARK_OBJ=ae.o anet.o openamdc-benchmark.o adlist.o dict.o zmalloc.o release.o crcspeed.o crc64.o siphash.o crc16.o monotonic.o cli_common.o mt19937-64.o mutex.o
-OPENAMDC_CHECK_RDB_NAME=openamdc-check-rdb$(PROG_SUFFIX)
-OPEAMDC_CHECK_AOF_NAME=openamdc-check-aof$(PROG_SUFFIX)
 
-all: $(OPENAMDC_SERVER_NAME) $(OPENAMDC_SENTINEL_NAME) $(OPENAMDC_CLI_NAME) $(OPENAMDC_BENCHMARK_NAME) $(OPENAMDC_CHECK_RDB_NAME) $(OPEAMDC_CHECK_AOF_NAME)
+all: $(OPENAMDC_SERVER_NAME) $(OPENAMDC_CLI_NAME) $(OPENAMDC_BENCHMARK_NAME)
 	@echo ""
 	@echo "Hint: It's a good idea to run 'make test' ;)"
 	@echo ""
@@ -351,18 +348,6 @@ endif
 $(OPENAMDC_SERVER_NAME): $(OPENAMDC_SERVER_OBJ)
 	$(OPENAMDC_LD) -o $@ $^ ../deps/hiredis/libhiredis.a ../deps/lua/src/liblua.a ../deps/rocksdb/librocksdb.a $(FINAL_LIBS)
 
-# openamdc-sentinel
-$(OPENAMDC_SENTINEL_NAME): $(OPENAMDC_SERVER_NAME)
-	$(OPENAMDC_INSTALL) $(OPENAMDC_SERVER_NAME) $(OPENAMDC_SENTINEL_NAME)
-
-# openamdc-check-rdb
-$(OPENAMDC_CHECK_RDB_NAME): $(OPENAMDC_SERVER_NAME)
-	$(OPENAMDC_INSTALL) $(OPENAMDC_SERVER_NAME) $(OPENAMDC_CHECK_RDB_NAME)
-
-# openamdc-check-aof
-$(OPEAMDC_CHECK_AOF_NAME): $(OPENAMDC_SERVER_NAME)
-	$(OPENAMDC_INSTALL) $(OPENAMDC_SERVER_NAME) $(OPEAMDC_CHECK_AOF_NAME)
-
 # openamdc-cli
 $(OPENAMDC_CLI_NAME): $(OPENAMDC_CLI_OBJ)
 	$(OPENAMDC_LD) -o $@ $^ ../deps/hiredis/libhiredis.a ../deps/linenoise/linenoise.o $(FINAL_LIBS)
@@ -381,7 +366,7 @@ DEP = $(OPENAMDC_SERVER_OBJ:%.o=%.d) $(OPENAMDC_CLI_OBJ:%.o=%.d) $(OPENAMDC_BENC
 	$(OPENAMDC_CC) -MMD -o $@ -c $<
 
 clean:
-	rm -rf $(OPENAMDC_SERVER_NAME) $(OPENAMDC_SENTINEL_NAME) $(OPENAMDC_CLI_NAME) $(OPENAMDC_BENCHMARK_NAME) $(OPENAMDC_CHECK_RDB_NAME) $(OPEAMDC_CHECK_AOF_NAME) *.o *.gcda *.gcno *.gcov openamdc.info lcov-html Makefile.dep
+	rm -rf $(OPENAMDC_SERVER_NAME) $(OPENAMDC_CLI_NAME) $(OPENAMDC_BENCHMARK_NAME) *.o *.gcda *.gcno *.gcov openamdc.info lcov-html Makefile.dep
 	rm -f $(DEP)
 
 .PHONY: clean
@@ -394,13 +379,13 @@ distclean: clean
 
 .PHONY: distclean
 
-test: $(OPENAMDC_SERVER_NAME) $(OPEAMDC_CHECK_AOF_NAME) $(OPENAMDC_CLI_NAME) $(OPENAMDC_BENCHMARK_NAME)
+test: $(OPENAMDC_SERVER_NAME) $(OPENAMDC_CLI_NAME) $(OPENAMDC_BENCHMARK_NAME)
 	@(cd ..; ./runtest)
 
 test-modules: $(OPENAMDC_SERVER_NAME)
 	@(cd ..; ./runtest-moduleapi)
 
-test-sentinel: $(OPENAMDC_SENTINEL_NAME) $(OPENAMDC_CLI_NAME)
+test-sentinel: $(OPENAMDC_CLI_NAME)
 	@(cd ..; ./runtest-sentinel)
 
 check: test
@@ -442,9 +427,6 @@ install: all
 	$(call MAKE_INSTALL,$(OPENAMDC_SERVER_NAME),$(INSTALL_BIN))
 	$(call MAKE_INSTALL,$(OPENAMDC_BENCHMARK_NAME),$(INSTALL_BIN))
 	$(call MAKE_INSTALL,$(OPENAMDC_CLI_NAME),$(INSTALL_BIN))
-	@ln -sf $(OPENAMDC_SERVER_NAME) $(INSTALL_BIN)/$(OPENAMDC_CHECK_RDB_NAME)
-	@ln -sf $(OPENAMDC_SERVER_NAME) $(INSTALL_BIN)/$(OPEAMDC_CHECK_AOF_NAME)
-	@ln -sf $(OPENAMDC_SERVER_NAME) $(INSTALL_BIN)/$(OPENAMDC_SENTINEL_NAME)
 
 uninstall:
-	rm -f $(INSTALL_BIN)/{$(OPENAMDC_SERVER_NAME),$(OPENAMDC_BENCHMARK_NAME),$(OPENAMDC_CLI_NAME),$(OPENAMDC_CHECK_RDB_NAME),$(OPEAMDC_CHECK_AOF_NAME),$(OPENAMDC_SENTINEL_NAME)}
+	rm -f $(INSTALL_BIN)/{$(OPENAMDC_SERVER_NAME),$(OPENAMDC_BENCHMARK_NAME),$(OPENAMDC_CLI_NAME)}
