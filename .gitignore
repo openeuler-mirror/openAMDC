@@ -39,3 +39,5 @@ compile_commands.json
 openamdc.code-workspace
 rocksdb.dir
 temp-*.rdb
+!pkg/rpm/centos/openamdc_build/openamdc_rpm/etc/systemd/system/openamdc.service.d
+!pkg/rpm/centos/openamdc_build/openamdc_rpm/etc/systemd/system/openamdc-sentinel.service.d

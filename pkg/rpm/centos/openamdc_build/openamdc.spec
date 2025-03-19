@@ -74,7 +74,6 @@ since keys can contain strings, hashes, lists, sets and sorted sets.
 
 
 %files
-/etc/logrotate.d/openamdc
 /etc/systemd/system/openamdc.service.d/limit.conf
 /etc/systemd/system/openamdc-sentinel.service.d/limit.conf
 /usr/bin/*
