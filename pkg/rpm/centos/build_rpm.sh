@@ -28,11 +28,8 @@ mkdir -p $DIR/openamdc_build/openamdc_rpm/etc/openamdc
 
 # move binaries to bin
 cp $BUILD/openamdc-server $DIR/openamdc_build/openamdc_rpm/usr/bin/
-cp $BUILD/openamdc-sentinel $DIR/openamdc_build/openamdc_rpm/usr/bin/
 cp $BUILD/openamdc-cli $DIR/openamdc_build/openamdc_rpm/usr/bin/
 cp $BUILD/openamdc-benchmark $DIR/openamdc_build/openamdc_rpm/usr/bin/
-cp $BUILD/openamdc-check-aof $DIR/openamdc_build/openamdc_rpm/usr/bin/
-cp $BUILD/openamdc-check-rdb $DIR/openamdc_build/openamdc_rpm/usr/bin/
 cp $BUILD/../openamdc.conf $DIR/openamdc_build/openamdc_rpm/etc/openamdc/
 cp $BUILD/../sentinel.conf $DIR/openamdc_build/openamdc_rpm/etc/openamdc/
 

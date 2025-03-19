@@ -14,7 +14,7 @@ getent group openamdc &> /dev/null || \
 groupadd -r openamdc &> /dev/null
 getent passwd openamdc &> /dev/null || \
 useradd -r -g openamdc -d /var/lib/openamdc -s /sbin/nologin \
--c 'OpenAMDC In-Memory Data Cache Server' openamdc &> /dev/null
+-c 'open Advanced In-Memory Data Cache' openamdc &> /dev/null
 exit 0
 
 

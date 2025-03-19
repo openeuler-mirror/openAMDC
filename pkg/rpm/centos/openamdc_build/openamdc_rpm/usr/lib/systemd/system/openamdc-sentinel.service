@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/openamdc-sentinel /etc/openamdc/sentinel.conf
+ExecStart=/usr/bin/openamdc-server --sentinel /etc/openamdc/sentinel.conf
 ExecStop=/bin/kill -s TERM $MAINPID
 WorkingDirectory=/var/lib/openamdc
 PIDFile=/var/run/openamdc-sentinel.pid
