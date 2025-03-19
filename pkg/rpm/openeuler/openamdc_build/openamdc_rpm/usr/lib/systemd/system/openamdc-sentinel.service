@@ -1,0 +1,36 @@
+[Unit]
+Description=Open Advanced In-Memory Data Cache
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/openamdc-server --sentinel /etc/openamdc/sentinel.conf
+ExecStop=/bin/kill -s TERM $MAINPID
+WorkingDirectory=/var/lib/openamdc
+PIDFile=/var/run/openamdc-sentinel.pid
+Restart=always
+User=openamdc
+Group=openamdc
+RuntimeDirectory=sentinel
+RuntimeDirectoryMode=2755
+
+UMask=007
+PrivateTmp=yes
+LimitNOFILE=65535
+PrivateDevices=yes
+ProtectHome=yes
+ReadOnlyDirectories=/
+ReadWriteDirectories=-/var/lib/openamdc
+ReadWriteDirectories=-/var/log/openamdc
+ReadWriteDirectories=-/var/run
+
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_SETGID CAP_SETUID CAP_SYS_RESOURCE
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+ProtectSystem=true
+ReadWriteDirectories=-/etc/openamdc
+
+[Install]
+WantedBy=multi-user.target
+Alias=openamdc-sentinel.service
