@@ -6,9 +6,9 @@ yum install -y rpm-build
 
 Usage: 
 ```bash
-$ cd openAMDC/pkg/rpm/centos
+$ cd openAMDC/pkg/rpm/openeuler
 $ sudo ./build_rpm.sh
-$ cd openAMDC/pkg/rpm/centos/rpm_files_generated
+$ cd openAMDC/pkg/rpm/openeuler/rpm_files_generated
 $ rpm -i openAMDC-*.rpm
 $ systemctl start openamdc.service
 ```
