@@ -1314,6 +1314,8 @@ int swapHotMemoryLoad(void) {
                 sdsfree(key);
                 goto cleanup;
             }
+            /* Remove the key from the expire dict. */
+            removeExpire(server.db+dbid, key);
             /* Delete the key from the cold filter. */
             cuckooFilterDelete(&server.swap->cold_filter[dbid], key, sdslen(key));
             server.db[dbid].cold_data_size--;
