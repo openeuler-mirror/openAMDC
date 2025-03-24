@@ -255,6 +255,10 @@ static sds swapDataEncodeObject(swapDataEntry *entry) {
     /* Init RIO */
     rioInitWithBuffer(&payload, sdsempty());
 
+    /* Save obj version */
+    if (rdbSaveType(&payload, RDB_OPCODE_VERSION) == -1) goto werr;
+    if (rdbSaveLen(&payload, entry->version) == -1) goto werr;
+
     /* Save the DB number */
     if (rdbSaveType(&payload, RDB_OPCODE_SELECTDB) == -1) goto werr;
     if (rdbSaveLen(&payload, entry->dbid) == -1) goto werr;
@@ -269,10 +273,6 @@ static sds swapDataEncodeObject(swapDataEntry *entry) {
     b[0] = LFUDecrAndReturn(entry->val);
     if (rdbSaveType(&payload, RDB_OPCODE_FREQ) == -1) goto werr;
     if (rioWrite(&payload, b,1) == 0) goto werr;
-
-    /* Save obj version */
-    if (rdbSaveType(&payload, RDB_OPCODE_VERSION) == -1) goto werr;
-    if (rdbSaveLen(&payload, entry->version) == -1) goto werr;
 
     /* Save type, value */
     if (rdbSaveObjectType(&payload, entry->val) == -1) goto werr;
@@ -1150,14 +1150,15 @@ int swapHotMemoryLoad(void) {
     if (!server.swap_enabled) return C_ERR;
 
     char *err = NULL;
+    size_t klen, vlen;
     int dbid, dist = 0, db = 0;
     rocksdb_iterator_t *iter;
     rocksdb_iterator_t **iterators = NULL;
-    long long dbnum, cold_data_size, swap_data_version, keys_loaded = 0;
+    long long dbnum, cold_data_size, swap_data_version = 0, keys_loaded = 0;
     long long delta, mem_toload, mem_loaded = 0;
     size_t mem_reported, mem_used;
 
-    /* Allocate memory for iterators */
+    /* Allocate memory for iterators. */
     iterators = zcalloc(sizeof(rocksdb_iterator_t *) * (server.dbnum + 1));
     rocksdb_create_iterators(server.swap->rocks->db,
                              server.swap->rocks->ropts,
@@ -1170,83 +1171,170 @@ int swapHotMemoryLoad(void) {
         goto cleanup;
     }
 
-    /* Process the current meta info. */
-    iter = iterators[META_CF];
-    for (rocksdb_iter_seek_to_first(iter);
-         rocksdb_iter_valid(iter);
-         rocksdb_iter_next(iter)) {
-        size_t klen, vlen;
-        char *key_buf = (char *)rocksdb_iter_key(iter, &klen);
-        char *val_buf = (char *)rocksdb_iter_value(iter, &vlen);
+    /* Get the status of RocksDB. */
+    char *status = rocksdb_get_cf(server.swap->rocks->db,
+                                  server.swap->rocks->ropts,
+                                  server.swap->rocks->cf_handles[META_CF],
+                                  "status",
+                                  6,
+                                  &vlen,
+                                  &err);
+    if (err != NULL) {
+        serverLog(LL_WARNING, "Rocksdb get status error, err: %s", err);
+        goto cleanup;
+    }
 
-        if (val_buf == NULL) goto cleanup;
-        
-        if (!strncmp(key_buf, "dbnum", 5)) {
-            /* Load the number of databases (dbnum) from RocksDB. */
-            /* Convert the value and check if the dbnum exceeds the configured maximum. */
-            if (string2ll(val_buf, vlen, &dbnum) == 0) goto cleanup;
-            
-            if ((int)dbnum < server.dbnum) {
-                serverLog(LL_WARNING,
-                    "FATAL: Rocksdb was created with a openAMDC "
-                    "server configured to handle more than %d "
-                    "databases. Exiting\n", server.dbnum);
-                exit(1);
-            }
-            server.dbnum = (int)dbnum;
-        } else if (!strncmp(key_buf, "swap_data_version", 17)) { 
-            /* Load the swap data version from RocksDB. */
-            /* Convert the value and set the swap data version. */
-            if (string2ll(val_buf, vlen, &swap_data_version) == 0) goto cleanup;
-            setGblVersion(swap_data_version);
-        } else if (!strncmp(key_buf, "cuckoo_filter_seed", 18)) {
-            cuckooFilterSetHashFunctionSeed((uint8_t *)val_buf);
-        } else if (strstr(key_buf, "cuckoo_filter")) {
-            /* Load the cuckoo filter from RocksDB for each database. */
-            int count;
-            long long db;
-            sds *argv = sdssplitlen(key_buf, klen, "#", 1, &count);
-            if (argv && count == 2) {
-                if (string2ll(argv[1], sdslen(argv[1]), &db) == 0) {
+    if (status == NULL || strncmp(status, "OK", 2) == 0){
+        /* Process the current meta info. */
+        iter = iterators[META_CF];
+        for (rocksdb_iter_seek_to_first(iter);
+            rocksdb_iter_valid(iter);
+            rocksdb_iter_next(iter)) {
+            char *key_buf = (char *)rocksdb_iter_key(iter, &klen);
+            char *val_buf = (char *)rocksdb_iter_value(iter, &vlen);
+
+            if (val_buf == NULL) goto cleanup;
+
+            if (!strncmp(key_buf, "dbnum", 5)) {
+                /* Load the number of databases (dbnum) from RocksDB. */
+                /* Convert the value and check if the dbnum exceeds the configured maximum. */
+                if (string2ll(val_buf, vlen, &dbnum) == 0) goto cleanup;
+                
+                if ((int)dbnum > server.dbnum) {
+                    serverLog(LL_WARNING,
+                        "FATAL: Rocksdb file was created with a openAMDC "
+                        "server configured to handle more than %d "
+                        "databases. Exiting\n", server.dbnum);
+                    exit(1);
+                }
+                server.dbnum = (int)dbnum;
+            } else if (!strncmp(key_buf, "swap_data_version", 17)) { 
+                /* Load the swap data version from RocksDB. */
+                /* Convert the value and set the swap data version. */
+                if (string2ll(val_buf, vlen, &swap_data_version) == 0) goto cleanup;
+                setGblVersion(swap_data_version);
+            } else if (!strncmp(key_buf, "cuckoo_filter_seed", 18)) {
+                cuckooFilterSetHashFunctionSeed((uint8_t *)val_buf);
+            } else if (strstr(key_buf, "cuckoo_filter")) {
+                /* Load the cuckoo filter from RocksDB for each database. */
+                int count;
+                long long db;
+                sds *argv = sdssplitlen(key_buf, klen, "#", 1, &count);
+                if (argv && count == 2) {
+                    if (string2ll(argv[1], sdslen(argv[1]), &db) == 0) {
+                        sdsfreesplitres(argv, count);
+                        goto cleanup;
+                    }
+                    /* Free the existing cuckoo filter. */
+                    cuckooFilterFree(&server.swap->cold_filter[db]);
+                    /* Decode and set the new cuckoo filter. */
+                    server.swap->cold_filter[db] = cuckooFilterDecodeChunk(val_buf, vlen);
+                    sdsfreesplitres(argv, count);
+                } else {
+                    serverLog(LL_WARNING, "Failed to decode cuckoo filter");
                     sdsfreesplitres(argv, count);
                     goto cleanup;
                 }
-                /* Free the existing cuckoo filter. */
-                cuckooFilterFree(&server.swap->cold_filter[db]);
-                /* Decode and set the new cuckoo filter. */
-                server.swap->cold_filter[db] = cuckooFilterDecodeChunk(val_buf, vlen);
-                sdsfreesplitres(argv, count);
+            } else if (strstr(key_buf, "cold_data_size")) {
+                /* Load the cold data size from RocksDB for each database. */
+                int count;
+                long long db;
+                sds *argv = sdssplitlen(key_buf, klen, "#", 1, &count);
+                if (argv && count == 2) {
+                    if (string2ll(argv[1], sdslen(argv[1]), &db) == 0) {
+                        sdsfreesplitres(argv, count);
+                        goto cleanup;
+                    }
+                    if (string2ll(val_buf, vlen, &cold_data_size) == 0) {
+                        sdsfreesplitres(argv, count);
+                        goto cleanup;
+                    }
+                    /* Set the cold data size. */
+                    server.db[db].cold_data_size = cold_data_size;
+                    sdsfreesplitres(argv, count);
+                } else {
+                    serverLog(LL_WARNING, "Failed to decode cuckoo filter");
+                    sdsfreesplitres(argv, count);
+                    goto cleanup;
+                }
+            } else if (!strncmp(key_buf, "status", 6)) {
+                /* skip */
             } else {
-                serverLog(LL_WARNING, "Failed to decode cuckoo filter");
-                sdsfreesplitres(argv, count);
-                goto cleanup;
+                /* We ignore fields we don't understand. */
+                serverLog(LL_WARNING,"Unrecognized rocksdb meta field");
             }
-        } else if (strstr(key_buf, "cold_data_size")) {
-            /* Load the cold data size from RocksDB for each database. */
-            int count;
-            long long db;
-            sds *argv = sdssplitlen(key_buf, klen, "#", 1, &count);
-            if (argv && count == 2) {
-                if (string2ll(argv[1], sdslen(argv[1]), &db) == 0) {
-                    sdsfreesplitres(argv, count);
-                    goto cleanup;
-                }
-                if (string2ll(val_buf, vlen, &cold_data_size) == 0) {
-                    sdsfreesplitres(argv, count);
-                    goto cleanup;
-                }
-                /* Set the cold data size. */
-                server.db[db].cold_data_size = cold_data_size;
-                sdsfreesplitres(argv, count);
-            } else {
-                serverLog(LL_WARNING, "Failed to decode cuckoo filter");
-                sdsfreesplitres(argv, count);
-                goto cleanup;
-            }
-        } else {
-            /* We ignore fields we don't understand. */
-            serverLog(LL_WARNING,"Unrecognized rocksdb meta field");
         }
+    } else {
+        size_t num_column_families;
+        uint8_t hashseed[16];
+        /* Initialize hash seed. */
+        getRandomBytes(hashseed,sizeof(hashseed));
+        cuckooFilterSetHashFunctionSeed(hashseed);
+        /* Clear the swap data version. */
+        swap_data_version = 0;
+        /* Clear the cuckoo filter and cold data size for each database. */
+        for (int i = 0; i < server.dbnum; i++) {
+            cuckooFilterClear(&server.swap->cold_filter[i]);
+            server.db[i].cold_data_size = 0;
+        }
+
+        /* Get the list column families of the RocksDB instance. */
+        rocksdb_list_column_families(server.swap->rocks->db_opts,
+            server.rocksdb_dir, &num_column_families, &err);
+        if (err != NULL) {
+            serverLog(LL_WARNING, "Rocksdb list column families error, err: %s", err);
+            goto cleanup;
+        }
+
+        /* Check if the number of column families is greater than the number of databases. */
+        if ((int)num_column_families-1 > server.dbnum) {
+            serverLog(LL_WARNING,
+                "FATAL: Rocksdb file was created with a openAMDC "
+                "server configured to handle more than %d "
+                "databases. Exiting\n", server.dbnum);
+            exit(1);
+        }
+        server.dbnum = (int)num_column_families-1;
+
+        /* Iterate over each database. */
+        for (int i = 0; i < server.dbnum; i++) {
+            iter = iterators[DB_CF(i)];
+            /* Move the iterator to the first key. */
+            rocksdb_iter_seek_to_first(iter);
+            /* If the iterator is valid. */
+            while (rocksdb_iter_valid(iter)) {
+                rio payload;
+                int type;
+                uint64_t version;
+                size_t klen, vlen;
+                char *key_buf = (char *)rocksdb_iter_key(iter, &klen);
+                char *val_buf = (char *)rocksdb_iter_value(iter, &vlen);
+
+                /* Initialize the payload. */
+                rioInitWithCBuffer(&payload, val_buf, vlen);
+                /* Read type. */
+                type = rdbLoadType(&payload);
+                if (type == -1 || type != RDB_OPCODE_VERSION) {
+                    serverLog(LL_WARNING, "Failed to read type");
+                    goto cleanup;
+                }
+                /* Read version. */
+                if ((version = rdbLoadLen(&payload, NULL)) == RDB_LENERR) {
+                    serverLog(LL_WARNING, "Failed to read version");
+                    goto cleanup;
+                }
+                /* Set the swap data version. */
+                if (version > (uint64_t)swap_data_version) swap_data_version = version;
+                /* Insert the key into the cuckoo filter. */
+                cuckooFilterInsert(&server.swap->cold_filter[i], key_buf, klen);
+                /* Increment cold data size. */
+                server.db[i].cold_data_size++;
+                /* Move the iterator to the next key. */
+                rocksdb_iter_next(iter);
+            }
+        }
+        /* Set the global version. */
+        setGblVersion(swap_data_version);
     }
 
     /* Iterate over each database. */
@@ -1254,7 +1342,7 @@ int swapHotMemoryLoad(void) {
         iter = iterators[DB_CF(i)];
         /* Move the iterator to the first key. */
         rocksdb_iter_seek_to_first(iter);
-        /* If the iterator is valid, set no_empty to 1 (indicating the database is empty). */
+        /* If the iterator is valid. */
         db += rocksdb_iter_valid(iter) ? 1 : 0;
     }
 
@@ -1315,7 +1403,7 @@ int swapHotMemoryLoad(void) {
                 goto cleanup;
             }
             /* Remove the key from the expire dict. */
-            removeExpire(server.db+dbid, key);
+            removeExpire(server.db+dbid, &keyobj);
             /* Delete the key from the cold filter. */
             cuckooFilterDelete(&server.swap->cold_filter[dbid], key, sdslen(key));
             server.db[dbid].cold_data_size--;
@@ -1406,6 +1494,20 @@ int swapHotMemoryLoad(void) {
             }
             dictReleaseIterator(di);
         }
+    }
+
+    /* Reset the status of the RocksDB column family. */
+    rocksdb_put_cf(server.swap->rocks->db,
+                   server.swap->rocks->wopts,
+                   server.swap->rocks->cf_handles[META_CF],
+                   "status",
+                   6,
+                   "RESET",
+                   5,
+                   &err);
+    if (err != NULL) {
+        serverLog(LL_WARNING, "Rocksdb write key error, err: %s",  err);
+        goto cleanup;
     }
 
     /* Free the iterators array. */
@@ -1585,6 +1687,22 @@ int swapHotmemorySave(void) {
                    sdslen(name),
                    (char *)seed,
                    seed_size,
+                   &err);
+    if (err != NULL) {
+        serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
+        goto cleanup;
+    }
+    sdsfree(name); name = NULL;
+
+    /* Save the status to RocksDB. */
+    name = sdsnew("status");
+    rocksdb_put_cf(server.swap->rocks->db,
+                   server.swap->rocks->wopts,
+                   server.swap->rocks->cf_handles[META_CF],
+                   name,
+                   sdslen(name),
+                   "OK",
+                   2,
                    &err);
     if (err != NULL) {
         serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
