@@ -11,6 +11,7 @@
  */
 
 #include "server.h"
+#include "swap.h"
 #include <math.h>
 #include <ctype.h>
 
@@ -21,11 +22,14 @@
 /* ===================== Creation and parsing of objects ==================== */
 
 robj *createObject(int type, void *ptr) {
-    robj *o = zmalloc(sizeof(*o));
+    size_t augsize = server.swap_enabled ? sizeof(robjAug) : 0;
+    char *bytes = zmalloc(augsize+sizeof(robj));
+    robj *o = (robj*)(bytes+augsize);
     o->type = type;
     o->encoding = OBJ_ENCODING_RAW;
     o->ptr = ptr;
     o->refcount = 1;
+    setVersion(o, OBJ_VERSION_INVALID);
 
     /* Set the LRU to the current lruclock (minutes resolution), or
      * alternatively the LFU counter. */
@@ -64,13 +68,16 @@ robj *createRawStringObject(const char *ptr, size_t len) {
  * an object where the sds string is actually an unmodifiable string
  * allocated in the same chunk as the object itself. */
 robj *createEmbeddedStringObject(const char *ptr, size_t len) {
-    robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr8)+len+1);
+    size_t augsize = server.swap_enabled ? sizeof(robjAug) : 0;
+    char *bytes = zmalloc(augsize+sizeof(robj)+sizeof(struct sdshdr8)+len+1);
+    robj *o = (robj*)(bytes+augsize);
     struct sdshdr8 *sh = (void*)(o+1);
 
     o->type = OBJ_STRING;
     o->encoding = OBJ_ENCODING_EMBSTR;
     o->ptr = sh+1;
     o->refcount = 1;
+    setVersion(o, OBJ_VERSION_INVALID);
     if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
         o->lru = (LFUGetTimeInMinutes()<<8) | LFU_INIT_VAL;
     } else {
@@ -355,6 +362,43 @@ void incrRefCount(robj *o) {
     }
 }
 
+void setVersion(robj *o, uint64_t version) {
+    if (!server.swap_enabled)
+        return;
+    robjAug *aug = (robjAug*)(o) - 1;
+    atomicSet(aug->version, version);
+}
+
+uint64_t getVersion(robj *o) {
+    if (server.swap_enabled) {
+        uint64_t version;
+        robjAug *aug = (robjAug*)(o) - 1;
+        atomicGet(aug->version, version);
+        return version;
+    }
+    return OBJ_VERSION_INVALID;
+}
+
+void incrGblVersion(void) {
+    if (!server.swap_enabled) return;
+
+    atomicIncr(server.swap->swap_data_version, 1);
+}
+
+void setGblVersion(uint64_t version) {
+    if (!server.swap_enabled) return;
+
+    atomicSet(server.swap->swap_data_version, version);
+}
+
+uint64_t getGblVersion(void) {
+    if (!server.swap_enabled) return OBJ_VERSION_INVALID;
+
+    uint64_t version;
+    atomicGet(server.swap->swap_data_version, version);
+    return version;
+}
+
 void decrRefCount(robj *o) {
     if (o->refcount == 1) {
         switch(o->type) {
@@ -367,7 +411,10 @@ void decrRefCount(robj *o) {
         case OBJ_STREAM: freeStreamObject(o); break;
         default: serverPanic("Unknown object type"); break;
         }
-        zfree(o);
+        if (server.swap_enabled)
+            zfree((robjAug*)(o)-1);
+        else
+            zfree(o);
     } else {
         if (o->refcount <= 0) serverPanic("decrRefCount against refcount <= 0");
         if (o->refcount != OBJ_SHARED_REFCOUNT) o->refcount--;
@@ -786,7 +833,6 @@ size_t streamRadixTreeMemoryUsage(rax *rax) {
  * Note that the returned value is just an approximation, especially in the
  * case of aggregated data types where only "sample_size" elements
  * are checked and averaged to estimate the total size. */
-#define OBJ_COMPUTE_SIZE_DEF_SAMPLES 5 /* Default sample size. */
 size_t objectComputeSize(robj *o, size_t sample_size) {
     sds ele, ele2;
     dict *d;
@@ -1196,7 +1242,9 @@ sds getMemoryDoctorReport(void) {
  * Either or both of them may be <0, in that case, nothing is set. */
 int objectSetLRUOrLFU(robj *val, long long lfu_freq, long long lru_idle,
                        long long lru_clock, int lru_multiplier) {
-    if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
+    if ((server.maxmemory_policy & MAXMEMORY_FLAG_LFU) ||
+        (server.swap_enabled &&
+        (server.swap->hotmemory_policy == SWAP_HOTMEMORY_FLAG_LFU))) {
         if (lfu_freq >= 0) {
             serverAssert(lfu_freq <= 255);
             val->lru = (LFUGetTimeInMinutes()<<8) | lfu_freq;

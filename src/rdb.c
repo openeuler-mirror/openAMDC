@@ -15,6 +15,7 @@
 #include "zipmap.h"
 #include "endianconv.h"
 #include "stream.h"
+#include "swap.h"
 
 #include <math.h>
 #include <fcntl.h>
@@ -62,8 +63,8 @@ void rdbReportError(int corruption_error, int linenum, char *reason, ...) {
     } else if (rdbFileBeingLoaded) {
         /* If we're loading an rdb file form disk, run rdb check (and exit) */
         serverLog(LL_WARNING, "%s", msg);
-        char *argv[2] = {"",rdbFileBeingLoaded};
-        redis_check_rdb_main(2,argv,NULL);
+        char *argv[3] = {"","--check-rdb",rdbFileBeingLoaded};
+        redis_check_rdb_main(3,argv,NULL);
     } else if (corruption_error) {
         /* In diskless loading, in case of corrupt file, log and exit. */
         serverLog(LL_WARNING, "%s. Failure loading rdb format", msg);
@@ -1095,6 +1096,13 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val, long long expiretime) {
         if (rdbWriteRaw(rdb,buf,1) == -1) return -1;
     }
 
+    /* Save obj version */
+    if (server.swap_enabled) {
+        uint64_t version = getVersion(val);
+        if (rdbSaveType(rdb, RDB_OPCODE_VERSION) == -1) return -1;
+        if (rdbSaveLen(rdb, version) == -1) return -1;
+    }
+
     /* Save type, key, value */
     if (rdbSaveObjectType(rdb,val) == -1) return -1;
     if (rdbSaveStringObject(rdb,key) == -1) return -1;
@@ -1142,6 +1150,9 @@ int rdbSaveInfoAuxFields(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     if (rdbSaveAuxFieldStrInt(rdb,"openamdc-bits",redis_bits) == -1) return -1;
     if (rdbSaveAuxFieldStrInt(rdb,"ctime",time(NULL)) == -1) return -1;
     if (rdbSaveAuxFieldStrInt(rdb,"used-mem",zmalloc_used_memory()) == -1) return -1;
+    if (server.swap_enabled) {
+        if (rdbSaveAuxFieldStrInt(rdb,"swap_data_version",getGblVersion()) == -1) return -1;
+    }
 
     /* Handle saving options that generate aux fields. */
     if (rsi) {
@@ -1215,6 +1226,7 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     long key_count = 0;
     long long info_updated_time = 0;
     char *pname = (rdbflags & RDBFLAGS_AOF_PREAMBLE) ? "AOF rewrite" :  "RDB";
+    if (server.swap_enabled) swapStartGenerateRDB();
 
     if (server.rdb_checksum)
         rdb->update_cksum = rioGenericUpdateChecksum;
@@ -1225,18 +1237,17 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
 
     for (j = 0; j < server.dbnum; j++) {
         redisDb *db = server.db+j;
-        dict *d = db->dict;
-        if (dictSize(d) == 0) continue;
-        di = dictGetSafeIterator(d);
+        size_t expires_size, db_size = dictSize(db->dict);
+        if (server.swap_enabled) db_size += db->cold_data_size;
+        if (db_size == 0) continue;
+        expires_size = dictSize(db->expires);
+        di = dictGetSafeIterator(db->dict);
 
         /* Write the SELECT DB opcode */
         if (rdbSaveType(rdb,RDB_OPCODE_SELECTDB) == -1) goto werr;
         if (rdbSaveLen(rdb,j) == -1) goto werr;
 
         /* Write the RESIZE DB opcode. */
-        uint64_t db_size, expires_size;
-        db_size = dictSize(db->dict);
-        expires_size = dictSize(db->expires);
         if (rdbSaveType(rdb,RDB_OPCODE_RESIZEDB) == -1) goto werr;
         if (rdbSaveLen(rdb,db_size) == -1) goto werr;
         if (rdbSaveLen(rdb,expires_size) == -1) goto werr;
@@ -1274,6 +1285,13 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
         }
         dictReleaseIterator(di);
         di = NULL; /* So that we don't release it again on error. */
+
+        /* If swap functionality is enabled. */
+        if (server.swap_enabled) {
+            /* Perform swap operation to write data into the RDB file. */
+            if (swapIterateGenerateRDB(rdb, rdbflags, j, key_count, processed, info_updated_time) == C_ERR)
+                goto werr;
+        }
     }
 
     /* If we are storing the replication information on disk, persist
@@ -1301,11 +1319,13 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     cksum = rdb->cksum;
     memrev64ifbe(&cksum);
     if (rioWrite(rdb,&cksum,8) == 0) goto werr;
+    if (server.swap_enabled) swapStopGenerateRDB();
     return C_OK;
 
 werr:
     if (error) *error = errno;
     if (di) dictReleaseIterator(di);
+    if (server.swap_enabled) swapStopGenerateRDB();
     return C_ERR;
 }
 
@@ -2431,6 +2451,7 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     }
 
     /* Key-specific attributes, set by opcodes before the key type. */
+    uint64_t version = 0;
     long long lru_idle = -1, lfu_freq = -1, expiretime = -1, now = mstime();
     long long lru_clock = LRU_CLOCK();
 
@@ -2467,6 +2488,9 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
             uint64_t qword;
             if ((qword = rdbLoadLen(rdb,NULL)) == RDB_LENERR) goto eoferr;
             lru_idle = qword;
+            continue; /* Read next opcode. */
+        } else if (server.swap_enabled && type == RDB_OPCODE_VERSION) {
+            if ((version = rdbLoadLen(rdb, NULL)) == RDB_LENERR) goto eoferr;
             continue; /* Read next opcode. */
         } else if (type == RDB_OPCODE_EOF) {
             /* EOF: End of file, exit the main loop. */
@@ -2546,6 +2570,9 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
             } else if (!strcasecmp(auxkey->ptr,"aof-preamble")) {
                 long long haspreamble = strtoll(auxval->ptr,NULL,10);
                 if (haspreamble) serverLog(LL_NOTICE,"RDB has an AOF tail");
+            } else if (server.swap_enabled && !strcasecmp(auxkey->ptr,"swap_data_version")) {
+                uint64_t swap_data_version = strtoull(auxval->ptr,NULL,10);
+                setGblVersion(swap_data_version);
             } else if (!strcasecmp(auxkey->ptr,"openamdc-bits")) {
                 /* Just ignored. */
             } else {
@@ -2677,7 +2704,24 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
             /* Set usage information (for eviction). */
             objectSetLRUOrLFU(val,lfu_freq,lru_idle,lru_clock,1000);
 
-            /* call key space notification on key loaded for modules only */
+            /* If swap is enabled, set the version information and submit the data to swap. */
+            if (server.swap_enabled) {
+                /* Set version information. */
+                setVersion(val, version);
+                /* If the hot data cache is not enabled. */
+                if (!server.swap_hotmemory) {
+                    /* Create a string object for the key. */
+                    robj *keyobj = createStringObject(key, sdslen(key));
+                    /* Create a swap data entry for swapping out the object. */
+                    swapDataEntry *entry = swapDataEntryCreate(SWAP_OUT, db->id, keyobj, val, expiretime, version);
+                    /* Submit the swap data entry to the swap. */
+                    swapDataEntrySubmit(entry, -1, 1);
+                    /* Decrement the reference count of the key. */
+                    decrRefCount(keyobj);
+                }
+            }
+
+            /* Call key space notification on key loaded for modules only. */
             moduleNotifyKeyspaceEvent(NOTIFY_LOADED, "loaded", &keyobj, db->id);
         }
 

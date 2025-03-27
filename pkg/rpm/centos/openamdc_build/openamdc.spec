@@ -14,7 +14,7 @@ getent group openamdc &> /dev/null || \
 groupadd -r openamdc &> /dev/null
 getent passwd openamdc &> /dev/null || \
 useradd -r -g openamdc -d /var/lib/openamdc -s /sbin/nologin \
--c 'OpenAMDC In-Memory Data Cache Server' openamdc &> /dev/null
+-c 'open Advanced In-Memory Data Cache' openamdc &> /dev/null
 exit 0
 
 
@@ -74,7 +74,6 @@ since keys can contain strings, hashes, lists, sets and sorted sets.
 
 
 %files
-/etc/logrotate.d/openamdc
 /etc/systemd/system/openamdc.service.d/limit.conf
 /etc/systemd/system/openamdc-sentinel.service.d/limit.conf
 /usr/bin/*

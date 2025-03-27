@@ -11,6 +11,7 @@
  */
 
 #include "server.h"
+#include "swap.h"
 
 /*-----------------------------------------------------------------------------
  * Set Commands
@@ -301,6 +302,7 @@ void saddCommand(client *c) {
     if (added) {
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_SET,"sadd",c->argv[1],c->db->id);
+        swapOut(c->argv[1], set, c->db->id);
     }
     server.dirty += added;
     addReplyLongLong(c,added);
@@ -326,9 +328,12 @@ void sremCommand(client *c) {
     if (deleted) {
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_SET,"srem",c->argv[1],c->db->id);
-        if (keyremoved)
-            notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],
-                                c->db->id);
+        if (keyremoved) {
+            notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1], c->db->id);
+            swapDel(c->argv[1], c->db->id);
+        } else {
+            swapOut(c->argv[1], set, c->db->id);
+        }
         server.dirty += deleted;
     }
     addReplyLongLong(c,deleted);
@@ -369,6 +374,9 @@ void smoveCommand(client *c) {
     if (setTypeSize(srcset) == 0) {
         dbDelete(c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
+        swapDel(c->argv[1], c->db->id);
+    } else {
+        swapOut(c->argv[1], srcset, c->db->id);
     }
 
     /* Create the destination set when it doesn't exist */
@@ -385,6 +393,7 @@ void smoveCommand(client *c) {
         server.dirty++;
         signalModifiedKey(c,c->db,c->argv[2]);
         notifyKeyspaceEvent(NOTIFY_SET,"sadd",c->argv[2],c->db->id);
+        swapOut(c->argv[2], dstset, c->db->id);
     }
     addReply(c,shared.cone);
 }
@@ -462,6 +471,7 @@ void spopWithCountCommand(client *c) {
 
     /* Generate an SPOP keyspace notification */
     notifyKeyspaceEvent(NOTIFY_SET,"spop",c->argv[1],c->db->id);
+    swapOut(c->argv[1], set, c->db->id);
     server.dirty += (count >= size) ? size : count;
 
     /* CASE 1:
@@ -474,6 +484,7 @@ void spopWithCountCommand(client *c) {
         /* Delete the set as it is now empty */
         dbDelete(c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
+        swapDel(c->argv[1], c->db->id);
 
         /* Propagate this command as a DEL operation */
         rewriteClientCommandVector(c,2,shared.del,c->argv[1]);
@@ -624,6 +635,9 @@ void spopCommand(client *c) {
     if (setTypeSize(set) == 0) {
         dbDelete(c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
+        swapDel(c->argv[1], c->db->id); 
+    } else {
+        swapOut(c->argv[1], set, c->db->id);
     }
 
     /* Set has been modified */
@@ -959,6 +973,7 @@ void sinterGenericCommand(client *c, robj **setkeys,
             addReplyLongLong(c,setTypeSize(dstset));
             notifyKeyspaceEvent(NOTIFY_SET,"sinterstore",
                 dstkey,c->db->id);
+            swapOut(dstkey, dstset, c->db->id);
             server.dirty++;
         } else {
             addReply(c,shared.czero);
@@ -966,6 +981,7 @@ void sinterGenericCommand(client *c, robj **setkeys,
                 server.dirty++;
                 signalModifiedKey(c,c->db,dstkey);
                 notifyKeyspaceEvent(NOTIFY_GENERIC,"del",dstkey,c->db->id);
+                swapDel(dstkey, c->db->id);
             }
         }
         decrRefCount(dstset);
@@ -1136,6 +1152,7 @@ void sunionDiffGenericCommand(client *c, robj **setkeys, int setnum,
             notifyKeyspaceEvent(NOTIFY_SET,
                 op == SET_OP_UNION ? "sunionstore" : "sdiffstore",
                 dstkey,c->db->id);
+            swapOut(dstkey, dstset, c->db->id);
             server.dirty++;
         } else {
             addReply(c,shared.czero);
@@ -1143,6 +1160,7 @@ void sunionDiffGenericCommand(client *c, robj **setkeys, int setnum,
                 server.dirty++;
                 signalModifiedKey(c,c->db,dstkey);
                 notifyKeyspaceEvent(NOTIFY_GENERIC,"del",dstkey,c->db->id);
+                swapDel(dstkey, c->db->id);
             }
         }
         decrRefCount(dstset);

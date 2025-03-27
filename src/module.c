@@ -2461,7 +2461,9 @@ void RM_ResetDataset(int restart_aof, int async) {
 
 /* Returns the number of keys in the current db. */
 unsigned long long RM_DbSize(RedisModuleCtx *ctx) {
-    return dictSize(ctx->client->db->dict);
+    size_t dbsize = dictSize(ctx->client->db->dict);
+    if (server.swap_enabled) dbsize += ctx->client->db->cold_data_size;
+    return dbsize;
 }
 
 /* Returns a name of a random key, or NULL if current db is empty. */

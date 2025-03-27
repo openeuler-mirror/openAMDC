@@ -183,7 +183,7 @@ as options using the command line. Examples:
     % ./openamdc-server --port 9999 --replicaof 127.0.0.1 6379
     % ./openamdc-server /etc/openamdc/6379.conf --loglevel debug
 
-All the options in redis.conf are also supported as options using the command
+All the options in openamdc.conf are also supported as options using the command
 line, with exactly the same name.
 
 Running openAMDC with TLS:
@@ -267,5 +267,4 @@ Use cases are important for features to be accepted.
 To-Do List
 ----------
 
-*  Data swap architecture, openAMDC stores hot data and cold data in memory and RocksDB respectively, expands the storage capacity of openAMDC, and supports the automatic exchange and balance of memory data and SSD data.
 *  Compatibility Upgrade from redis 6.2 to redis 7.2.

@@ -33,6 +33,7 @@
 #include <sys/socket.h>
 #include <lua.h>
 #include <signal.h>
+#include <rocksdb/c.h>
 
 #ifdef HAVE_LIBSYSTEMD
 #include <systemd/sd-daemon.h>
@@ -87,6 +88,7 @@ typedef long long ustime_t; /* microsecond time type. */
 #define CRON_DBS_PER_CALL 16
 #define NET_MAX_WRITES_PER_EVENT (1024*64)
 #define PROTO_SHARED_SELECT_CMDS 10
+#define OBJ_COMPUTE_SIZE_DEF_SAMPLES 5        /* Default sample size. */
 #define OBJ_SHARED_INTEGERS 10000
 #define OBJ_SHARED_BULKHDR_LEN 32
 #define OBJ_SHARED_HDR_STRLEN(_len_) (((_len_) < 10) ? 4 : 5) /* see shared.mbulkhdr etc. */
@@ -668,6 +670,7 @@ typedef struct RedisModuleDigest {
 #define OBJ_SHARED_REFCOUNT INT_MAX     /* Global object never destroyed. */
 #define OBJ_STATIC_REFCOUNT (INT_MAX-1) /* Object allocated in the stack. */
 #define OBJ_FIRST_SPECIAL_REFCOUNT OBJ_STATIC_REFCOUNT
+#define OBJ_VERSION_INVALID UINT64_MAX
 typedef struct redisObject {
     unsigned type:4;
     unsigned encoding:4;
@@ -677,6 +680,10 @@ typedef struct redisObject {
     redisAtomic int refcount;
     void *ptr;
 } robj;
+
+typedef struct redisObjectAugment {
+    redisAtomic uint64_t version;
+} robjAug;
 
 /* The a string name for an object's type as listed above
  * Native types are checked against the OBJ_STRING, OBJ_LIST, OBJ_* defines,
@@ -707,15 +714,23 @@ typedef struct clientReplyBlock {
  * by integers from 0 (the default database) up to the max configured
  * database. The database number is the 'id' field in the structure. */
 typedef struct redisDb {
-    dict *dict;                 /* The keyspace for this DB */
-    dict *expires;              /* Timeout of keys with a timeout set */
-    dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
-    dict *ready_keys;           /* Blocked keys that received a PUSH */
-    dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
-    int id;                     /* Database ID */
-    long long avg_ttl;          /* Average TTL, just for stats */
-    unsigned long expires_cursor; /* Cursor of the active expire cycle. */
-    list *defrag_later;         /* List of key names to attempt to defrag one by one, gradually. */
+    dict *dict;                                  /* The keyspace for this DB */
+    dict *expires;                               /* Timeout of keys with a timeout set */
+    dict *blocking_keys;                         /* Keys with clients waiting for data (BLPOP)*/
+    dict *ready_keys;                            /* Blocked keys that received a PUSH */
+    dict *watched_keys;                          /* WATCHED keys for MULTI/EXEC CAS */
+    int id;                                      /* Database ID */
+    long long avg_ttl;                           /* Average TTL, just for stats */
+    unsigned long expires_cursor;                /* Cursor of the active expire cycle. */
+    list *defrag_later;                          /* List of key names to attempt to defrag one by one, gradually. */
+    size_t cold_data_size;                       /* Cold data size (keys not in memory) */
+    size_t stat_total_lookup_count;              /* Total request num */
+    size_t stat_hit_ram_count;                   /* Requests processed directly from RAM */
+    long long stat_swap_in_keys_total;           /* Total number of keys swapped in */
+    long long stat_swap_in_empty_keys_skipped;   /* Number of swap keys skipped due to being empty */
+    long long stat_swap_in_expired_keys_skipped; /* Number of swap keys skipped due to being expired */
+    long long stat_swap_out_keys_total;          /* Total number of keys swapped out */
+    long long stat_swap_del_keys_total;          /* Total number of keys deleted */ 
 } redisDb;
 
 /* Declare database backup that include openAMDC main DBs and slots to keys map.
@@ -961,6 +976,8 @@ typedef struct client {
     int async_write_handler_active;
     int async_ops;
     clientReplyBlock *async_reply_block;
+    unsigned long *cold_data_iter_cursor;
+    rocksdb_iterator_t **cold_data_iters;
 } client;
 
 struct saveparam {
@@ -1320,6 +1337,7 @@ struct redisServer {
     long long stat_dump_payload_sanitizations; /* Number deep dump payloads integrity validations. */
     redisAtomic long long stat_total_reads_processed; /* Total number of read events processed */
     redisAtomic long long stat_total_writes_processed; /* Total number of write events processed */
+
     /* The following two are used to track instantaneous metrics, like
      * number of operations per second, network traffic. */
     struct {
@@ -1647,6 +1665,46 @@ struct redisServer {
                                 * failover then any replica can be used. */
     int target_replica_port; /* Failover target port */
     int failover_state; /* Failover state */
+
+    /* Swap data */
+    int swap_enabled; /* Is swap enabled? */
+    struct swapState *swap; /* State of the swap */
+    int swap_flush_threads_num; /* Number of threads used to flush data to swap */
+    int swap_data_entry_batch_size; /* Batch of data entries to be written to swap */
+    unsigned long long swap_hotmemory; /* Max number of hot memory bytes to use */
+    int swap_hotmemory_samples; /* Precision of random sampling */
+    int swap_hotmemory_eviction_tenacity; /* Aggressiveness of swap processing */
+    unsigned long long swap_cuckoofilter_size_for_level; /* Size of the cuckoo filter in bytes */
+    int swap_cuckoofilter_bucket_size; /* Size of cuckoo filter bucket */
+    int swap_purge_rocksdb_after_load; /* Purge rocksdb after load */
+    char *rocksdb_dir; /* Name of the rocksdb file dir */
+    int rocksdb_max_background_jobs; /* Set the maximum number of concurrent background operations such as compaction and mergin */
+    int rocksdb_max_background_compactions; /* The maximum number of concurrent compaction jobs in the background */
+    int rocksdb_max_background_flushes; /* The maximum number of concurrent flush operations that RocksDB can execute in the background. */
+    int rocksdb_max_subcompactions; /* The maximum number of subcompactions that can be run in parallel for a single compaction operation */
+    int rocksdb_max_open_files; /* The maximum number of open files that RocksDB can use. */
+    int rocksdb_enable_pipelined_write; /* Enable pipelined write operation to improve write throughput. */
+    int rocksdb_WAL_ttl_seconds; /* The time (in seconds) to retain the WAL (Write-Ahead Log) before it can be discarded. */
+    int rocksdb_WAL_size_limit_MB; /* The maximum size limit (in megabytes) of the Write-Ahead Log (WAL) in RocksDB. */
+    unsigned long long rocksdb_max_total_wal_size; /* The maximum total size limit of all Write-Ahead Logs (WALs) in RocksDB. */
+    int rocksdb_compression; /* The compression algorithm used for data storage to reduce disk space usage. */
+    int rocksdb_level0_slowdown_writes_trigger; /* The condition to slow down writes when the number of L0 files reaches a certain threshold. */
+    int rocksdb_disable_auto_compactions; /* Whether to disable automatic Compactions. */
+    int rocksdb_enable_blob_files; /* Enable or disable the use of blob files for storing large values separately. */
+    int rocksdb_enable_blob_garbage_collection; /* Enable or disable blob garbage collection in RocksDB. */
+    unsigned long long rocksdb_min_blob_size; /* The minimum size of a blob in RocksDB. */
+    unsigned long long rocksdb_blob_file_size; /* The size limit of a blob file in RocksDB. */
+    int rocksdb_blob_garbage_collection_age_cutoff_percentage; /* The percentage threshold for blob garbage collection age cutoff in RocksDB. */
+    int rocksdb_blob_garbage_collection_force_threshold_percentage; /* The percentage threshold that forces RocksDB blob garbage collection. */
+    int rocksdb_max_write_buffer_number; /* The percentage threshold that forces blob garbage collection when exceeded. */
+    unsigned long long rocksdb_target_file_size_base; /* The base size for target file size in RocksDB, which affects the size of files to be compacted. */
+    unsigned long long rocksdb_write_buffer_size; /* The size of the buffer used for writing data before flushing to disk in RocksDB. */
+    unsigned long long rocksdb_max_bytes_for_level_base; /* The maximum number of bytes for a single level in RocksDB (except the last level). */
+    int rocksdb_max_bytes_for_level_multiplier; /* The multiplier used to calculate the maximum bytes for each level in RocksDB. */
+    int rocksdb_compaction_dynamic_level_bytes; /* This parameter controls the dynamic bytes limit for each compaction level in RocksDB. */
+    int rocksdb_block_size; /* The size of a RocksDB block which affects data storage and retrieval efficiency. */
+    int rocksdb_cache_index_and_filter_blocks; /* Whether to cache index and filter blocks in RocksDB cache. */
+    unsigned long long rocksdb_block_cache_size; /* The size of RocksDB block cache which stores frequently accessed data blocks to improve read performance. */
 };
 
 #define MAX_KEYS_BUFFER 256
@@ -2005,6 +2063,11 @@ void afterPropagateExec();
 void decrRefCount(robj *o);
 void decrRefCountVoid(void *o);
 void incrRefCount(robj *o);
+void setVersion(robj *o, uint64_t version);
+uint64_t getVersion(robj *o);
+void incrGblVersion(void);
+void setGblVersion(uint64_t version);
+uint64_t getGblVersion(void);
 robj *makeObjectShared(robj *o);
 robj *resetRefCount(robj *obj);
 void freeStringObject(robj *o);
@@ -2052,6 +2115,7 @@ int compareStringObjects(robj *a, robj *b);
 int collateStringObjects(robj *a, robj *b);
 int equalStringObjects(robj *a, robj *b);
 unsigned long long estimateObjectIdleTime(robj *o);
+size_t objectComputeSize(robj *o, size_t sample_size);
 void trimStringObjectIfNeeded(robj *o);
 #define sdsEncodedObject(objptr) (objptr->encoding == OBJ_ENCODING_RAW || objptr->encoding == OBJ_ENCODING_EMBSTR)
 
@@ -2105,6 +2169,8 @@ void loadingProgress(off_t pos);
 void stopLoading(int success);
 void startSaving(int rdbflags);
 void stopSaving(int success);
+void startLoadingRocksdb(size_t size);
+void stopLoadingRocksdb(int success);
 int allPersistenceDisabled(void);
 
 #define DISK_ERROR_TYPE_AOF 1       /* Don't accept writes: AOF errors. */
@@ -2390,6 +2456,7 @@ int objectSetLRUOrLFU(robj *val, long long lfu_freq, long long lru_idle,
 #define LOOKUP_NONE 0
 #define LOOKUP_NOTOUCH (1<<0)
 #define LOOKUP_NONOTIFY (1<<1)
+#define LOOKUP_NOSWAP (1<<2)
 void dbAdd(redisDb *db, robj *key, robj *val);
 int dbAddRDBLoad(redisDb *db, sds key, robj *val);
 void dbOverwrite(redisDb *db, robj *key, robj *val);
@@ -2746,6 +2813,7 @@ void aclCommand(client *c);
 void lcsCommand(client *c);
 void resetCommand(client *c);
 void failoverCommand(client *c);
+void swapCommand(client *c);
 
 #if defined(__GNUC__)
 void *calloc(size_t count, size_t size) __attribute__ ((deprecated));

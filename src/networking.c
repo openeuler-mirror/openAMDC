@@ -13,6 +13,7 @@
 #include "server.h"
 #include "atomicvar.h"
 #include "cluster.h"
+#include "swap.h"
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <math.h>
@@ -195,6 +196,10 @@ client *createClient(connection *conn, int iel) {
     c->async_write_handler_active = 0;
     c->async_ops = 0;
     c->async_reply_block = NULL;
+    if (server.swap_enabled) {
+        c->cold_data_iters = zcalloc(sizeof(rocksdb_iterator_t*) * server.dbnum);
+        c->cold_data_iter_cursor = zcalloc(sizeof(unsigned long) * server.dbnum);
+    }
     if (conn) linkClient(c);
     initClientMultiState(c);
     return c;
@@ -1749,6 +1754,15 @@ void freeClient(client *c) {
     sdsfree(c->peerid);
     sdsfree(c->sockname);
     sdsfree(c->slave_addr);
+    if (server.swap_enabled) {
+        for (int i = 0; i < server.dbnum; i++) {
+            if (c->cold_data_iters[i] != NULL) {
+                rocksdb_iter_destroy(c->cold_data_iters[i]);
+            }
+        }
+        zfree(c->cold_data_iters);
+        zfree(c->cold_data_iter_cursor);
+    }
     wrapperMutexUnlock(&wl);
     mutexDestroy(&c->lock);
     zfree(c);
@@ -2415,6 +2429,11 @@ void commandProcessed(client *c, int callFlags) {
                     c->pending_querybuf, applied);
             sdsrange(c->pending_querybuf,applied,-1);
         }
+    }
+
+    /* Process any pending swap entries if swap is enabled. */
+    if (server.swap_enabled) {
+        swapProcessPendingEntries(threadId);
     }
 }
 
@@ -3886,7 +3905,7 @@ void processEventsWhileBlocked(int iel) {
     listRelease(clients);
 }
 
-parsed* parsedCreate(int argc) {
+parsed *parsedCreate(int argc) {
     parsed *p = zmalloc(sizeof(parsed));
     p->argv = zmalloc(sizeof(robj*) * argc);
     p->argc = 0;

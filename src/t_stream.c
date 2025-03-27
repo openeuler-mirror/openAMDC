@@ -11,6 +11,7 @@
  */
 
 #include "server.h"
+#include "swap.h"
 #include "endianconv.h"
 #include "stream.h"
 
@@ -1821,12 +1822,14 @@ void xaddCommand(client *c) {
 
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_STREAM,"xadd",c->argv[1],c->db->id);
+    swapOut(c->argv[1], o, c->db->id);    
     server.dirty++;
 
     /* Trim if needed. */
     if (parsed_args.trim_strategy != TRIM_STRATEGY_NONE) {
         if (streamTrim(s, &parsed_args)) {
             notifyKeyspaceEvent(NOTIFY_STREAM,"xtrim",c->argv[1],c->db->id);
+            swapOut(c->argv[1], o, c->db->id);
         }
         if (parsed_args.approx_trim) {
             /* In case our trimming was limited (by LIMIT or by ~) we must
@@ -2155,7 +2158,10 @@ void xreadCommand(client *c) {
             streamReplyWithRange(c,s,&start,NULL,count,0,
                                  groups ? groups[i] : NULL,
                                  consumer, flags, &spi);
-            if (groups) server.dirty++;
+            if (groups) {
+                server.dirty++;
+                swapOut(c->argv[streams_arg+i], o, c->db->id);
+            }
         }
     }
 
@@ -2345,7 +2351,7 @@ void xgroupCommand(client *c) {
     streamCG *cg = NULL;
     char *opt = c->argv[1]->ptr; /* Subcommand name. */
     int mkstream = 0;
-    robj *o;
+    robj *o = NULL;
 
     /* CREATE has an MKSTREAM option that creates the stream if it
      * does not exist. */
@@ -2438,6 +2444,7 @@ NULL
             server.dirty++;
             notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-create",
                                 c->argv[2],c->db->id);
+            swapOut(c->argv[2], o, c->db->id);
         } else {
             addReplyError(c,"-BUSYGROUP Consumer Group name already exists");
         }
@@ -2452,6 +2459,7 @@ NULL
         addReply(c,shared.ok);
         server.dirty++;
         notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-setid",c->argv[2],c->db->id);
+        swapOut(c->argv[2], o, c->db->id);
     } else if (!strcasecmp(opt,"DESTROY") && c->argc == 4) {
         if (cg) {
             raxRemove(s->cgroups,(unsigned char*)grpname,sdslen(grpname),NULL);
@@ -2460,6 +2468,7 @@ NULL
             server.dirty++;
             notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-destroy",
                                 c->argv[2],c->db->id);
+            swapOut(c->argv[2], o, c->db->id);
             /* We want to unblock any XREADGROUP consumers with -NOGROUP. */
             signalKeyAsReady(c->db,c->argv[2],OBJ_STREAM);
         } else {
@@ -2472,6 +2481,7 @@ NULL
             server.dirty++;
             notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-createconsumer",
                                 c->argv[2],c->db->id);
+            swapOut(c->argv[2], o, c->db->id);
         }
         addReplyLongLong(c,created);
     } else if (!strcasecmp(opt,"DELCONSUMER") && c->argc == 5) {
@@ -2482,6 +2492,7 @@ NULL
         server.dirty++;
         notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-delconsumer",
                             c->argv[2],c->db->id);
+        swapOut(c->argv[2], o, c->db->id);
     } else {
         addReplySubcommandSyntaxError(c);
     }
@@ -2515,6 +2526,7 @@ void xsetidCommand(client *c) {
     addReply(c,shared.ok);
     server.dirty++;
     notifyKeyspaceEvent(NOTIFY_STREAM,"xsetid",c->argv[1],c->db->id);
+    swapOut(c->argv[1], o, c->db->id);
 }
 
 /* XACK <key> <group> <id> <id> ... <id>
@@ -2568,6 +2580,7 @@ void xackCommand(client *c) {
             streamFreeNACK(nack);
             acknowledged++;
             server.dirty++;
+            swapOut(c->argv[1], o, c->db->id);
         }
     }
     addReplyLongLong(c,acknowledged);
@@ -3010,11 +3023,13 @@ void xclaimCommand(client *c) {
             streamPropagateXCLAIM(c,c->argv[1],group,c->argv[2],c->argv[j],nack);
             propagate_last_id = 0; /* Will be propagated by XCLAIM itself. */
             server.dirty++;
+            swapOut(c->argv[1], o, c->db->id);
         }
     }
     if (propagate_last_id) {
         streamPropagateGroupID(c,c->argv[1],group,c->argv[2]);
         server.dirty++;
+        swapOut(c->argv[1], o, c->db->id);
     }
     setDeferredArrayLen(c,arraylenptr,arraylen);
     preventCommandPropagation(c);
@@ -3159,6 +3174,7 @@ void xautoclaimCommand(client *c) {
         streamPropagateXCLAIM(c,c->argv[1],group,c->argv[2],idstr,nack);
         decrRefCount(idstr);
         server.dirty++;
+        swapOut(c->argv[1], o, c->db->id);
     }
 
     /* We need to return the next entry as a cursor for the next XAUTOCLAIM call */
@@ -3212,6 +3228,7 @@ void xdelCommand(client *c) {
     if (deleted) {
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_STREAM,"xdel",c->argv[1],c->db->id);
+        swapOut(c->argv[1], o, c->db->id);
         server.dirty += deleted;
     }
     addReplyLongLong(c,deleted);
@@ -3260,6 +3277,7 @@ void xtrimCommand(client *c) {
     int64_t deleted = streamTrim(s, &parsed_args);
     if (deleted) {
         notifyKeyspaceEvent(NOTIFY_STREAM,"xtrim",c->argv[1],c->db->id);
+        swapOut(c->argv[1], o, c->db->id);
         if (parsed_args.approx_trim) {
             /* In case our trimming was limited (by LIMIT or by ~) we must
              * re-write the relevant trim argument to make sure there will be

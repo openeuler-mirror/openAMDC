@@ -14,6 +14,7 @@
 #include "sha1.h"   /* SHA1 is used for DEBUG DIGEST */
 #include "crc64.h"
 #include "bio.h"
+#include "swap.h"
 
 #include <arpa/inet.h>
 #include <signal.h>
@@ -292,6 +293,47 @@ void computeDatasetDigest(unsigned char *final) {
             decrRefCount(keyobj);
         }
         dictReleaseIterator(di);
+
+        if (server.swap_enabled) {
+            if (db->cold_data_size == 0) continue;
+            /* Create an iterator for the specified column family in the RocksDB database. */
+            rocksdb_iterator_t *iter =
+                rocksdb_create_iterator_cf(server.swap->rocks->db,
+                                           server.swap->rocks->ropts,
+                                           server.swap->rocks->cf_handles[DB_CF(j)]);   
+            /* Iterate over all key-value pairs in the column family. */
+            for (rocksdb_iter_seek_to_first(iter);
+                 rocksdb_iter_valid(iter);
+                 rocksdb_iter_next(iter)) {
+                swapDataRetrieval *r;
+                robj keyobj, *o;
+                size_t klen, vlen;
+                /* Get the key and value from the iterator. */
+                char *key_buf = (char *)rocksdb_iter_key(iter, &klen);
+                char *val_buf = (char *)rocksdb_iter_value(iter, &vlen);
+                sds key = sdsnewlen(key_buf, klen);
+                initStaticStringObject(keyobj, key);
+
+                /* Decode the retrieved data， if decoding fails, free the allocated memory and return NULL. */
+                if ((r = swapDataDecodeObject(&keyobj, val_buf, vlen)) == NULL) { 
+                    sdsfree(key);
+                    serverPanic("swapDataDecodeObject failed");
+                } else {
+                    o = r->val;
+                    swapDataRetrievalRelease(r);
+                }
+
+                mixDigest(digest,key,sdslen(key));
+                xorObjectDigest(db,&keyobj,digest,o);
+
+                /* We can finally xor the key-val digest to the final digest */
+                xorDigest(final,digest,20);
+                sdsfree(key);
+                decrRefCount(o);
+            }
+            /* Destroy the iterator. */
+            rocksdb_iter_destroy(iter);
+        }
     }
 }
 

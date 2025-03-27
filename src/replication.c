@@ -1544,7 +1544,7 @@ void restartAOFAfterSYNC() {
 
 static int useDisklessLoad() {
     /* compute boolean decision to use diskless load */
-    int enabled = server.repl_diskless_load == REPL_DISKLESS_LOAD_SWAPDB ||
+    int enabled = (!server.swap_enabled && server.repl_diskless_load == REPL_DISKLESS_LOAD_SWAPDB) ||
            (server.repl_diskless_load == REPL_DISKLESS_LOAD_WHEN_DB_EMPTY && dbTotalServerKeyCount()==0);
     /* Check all modules handle read errors, otherwise it's not safe to use diskless load. */
     if (enabled && !moduleAllDatatypesHandleErrors()) {
@@ -1771,7 +1771,8 @@ void readSyncBulkPayload(connection *conn) {
     {
         /* Create a backup of server.db[] and initialize to empty
          * dictionaries. */
-        diskless_load_backup = disklessLoadMakeBackup();
+        if (!server.swap_enabled)
+            diskless_load_backup = disklessLoadMakeBackup();
     }
     /* We call to emptyDb even in case of REPL_DISKLESS_LOAD_SWAPDB
      * (Where disklessLoadMakeBackup left server.db empty) because we
@@ -1810,7 +1811,8 @@ void readSyncBulkPayload(connection *conn) {
 
             if (server.repl_diskless_load == REPL_DISKLESS_LOAD_SWAPDB) {
                 /* Restore the backed up databases. */
-                disklessLoadRestoreBackup(diskless_load_backup);
+                if (!server.swap_enabled)
+                    disklessLoadRestoreBackup(diskless_load_backup);
             }
 
             /* Note that there's no point in restarting the AOF on SYNC
@@ -1824,7 +1826,8 @@ void readSyncBulkPayload(connection *conn) {
             /* Delete the backup databases we created before starting to load
              * the new RDB. Now the RDB was loaded with success so the old
              * data is useless. */
-            disklessLoadDiscardBackup(diskless_load_backup, empty_db_flags);
+            if (!server.swap_enabled)
+                disklessLoadDiscardBackup(diskless_load_backup, empty_db_flags);
         }
 
         /* Verify the end mark is correct. */

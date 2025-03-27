@@ -12,6 +12,7 @@
 
 #include "server.h"
 #include "cluster.h"
+#include "swap.h"
 #include "endianconv.h"
 
 #include <sys/types.h>
@@ -4087,7 +4088,9 @@ int verifyClusterConfigWithData(void) {
 
     /* Make sure we only have keys in DB0. */
     for (j = 1; j < server.dbnum; j++) {
-        if (dictSize(server.db[j].dict)) return C_ERR;
+        size_t dbsize = dictSize(server.db[j].dict);
+        if (server.swap_enabled) dbsize += server.db[j].cold_data_size;
+        if (dbsize) return C_ERR;
     }
 
     /* Check that all the slots we see populated memory have a corresponding
@@ -4537,7 +4540,9 @@ NULL
         clusterReplyMultiBulkSlots(c);
     } else if (!strcasecmp(c->argv[1]->ptr,"flushslots") && c->argc == 2) {
         /* CLUSTER FLUSHSLOTS */
-        if (dictSize(server.db[0].dict) != 0) {
+        size_t dbsize = dictSize(server.db[0].dict);
+        if (server.swap_enabled) dbsize += server.db[0].cold_data_size;
+        if (dbsize != 0) {
             addReplyError(c,"DB must be empty to perform CLUSTER FLUSHSLOTS.");
             return;
         }
@@ -4849,6 +4854,7 @@ NULL
                              CLUSTER_TODO_SAVE_CONFIG);
         addReply(c,shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"replicate") && c->argc == 3) {
+        size_t dbsize;
         /* CLUSTER REPLICATE <NODE ID> */
         clusterNode *n = clusterLookupNode(c->argv[2]->ptr);
 
@@ -4873,8 +4879,10 @@ NULL
         /* If the instance is currently a master, it should have no assigned
          * slots nor keys to accept to replicate some other node.
          * Slaves can switch to another master without issues. */
+        dbsize = dictSize(server.db[0].dict);
+        if (server.swap_enabled) dbsize += server.db[0].cold_data_size;
         if (nodeIsMaster(myself) &&
-            (myself->numslots != 0 || dictSize(server.db[0].dict) != 0)) {
+            (myself->numslots != 0 || dbsize != 0)) {
             addReplyError(c,
                 "To set a master the node must be empty and "
                 "without assigned slots.");
@@ -5019,6 +5027,7 @@ NULL
     {
         /* CLUSTER RESET [SOFT|HARD] */
         int hard = 0;
+        size_t dbsize;
 
         /* Parse soft/hard argument. Default is soft. */
         if (c->argc == 3) {
@@ -5034,7 +5043,9 @@ NULL
 
         /* Slaves can be reset while containing data, but not master nodes
          * that must be empty. */
-        if (nodeIsMaster(myself) && dictSize(c->db->dict) != 0) {
+        dbsize = dictSize(c->db->dict);
+        if (server.swap_enabled) dbsize += c->db->cold_data_size;
+        if (nodeIsMaster(myself) && dbsize != 0) {
             addReplyError(c,"CLUSTER RESET can't be called with "
                             "master nodes containing keys");
             return;
@@ -5211,6 +5222,7 @@ void restoreCommand(client *c) {
             rewriteClientCommandVector(c,2,shared.del,key);
             signalModifiedKey(c,c->db,key);
             notifyKeyspaceEvent(NOTIFY_GENERIC,"del",key,c->db->id);
+            swapDel(key, c->db->id);    
             server.dirty++;
         }
         decrRefCount(obj);
@@ -5226,6 +5238,7 @@ void restoreCommand(client *c) {
     objectSetLRUOrLFU(obj,lfu_freq,lru_idle,lru_clock,1000);
     signalModifiedKey(c,c->db,key);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"restore",key,c->db->id);
+    swapOut(key, obj, c->db->id);    
     addReply(c,shared.ok);
     server.dirty++;
 }
