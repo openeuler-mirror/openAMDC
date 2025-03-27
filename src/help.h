@@ -1444,7 +1444,12 @@ struct commandHelp {
     "destination numkeys key [key ...] [WEIGHTS weight] [AGGREGATE SUM|MIN|MAX]",
     "Add multiple sorted sets and store the resulting sorted set in a new key",
     4,
-    "2.0.0" }
+    "2.0.0" },
+    { "swap",
+    "where|in|out key",
+    "Swap management commands",
+    0,
+    "1.0.0" }
 };
 
 #endif

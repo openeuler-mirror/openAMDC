@@ -12,6 +12,7 @@
 
 #include "server.h"
 #include "cluster.h"
+#include "swap.h"
 #include "atomicvar.h"
 #include "latency.h"
 
@@ -58,8 +59,34 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
                 val->lru = LRU_CLOCK();
             }
         }
+        db->stat_hit_ram_count++;
+        db->stat_total_lookup_count++;
         return val;
     } else {
+        /* If swap is enabled and the key is not found in cold filter. */
+        if (server.swap_enabled && !(flags & LOOKUP_NOSWAP) &&
+            cuckooFilterContains(&server.swap->cold_filter[db->id], key->ptr, sdslen(key->ptr))) {
+            /* Attempt to swap the key back into memory. */
+            robj *val = swapIn(key, db->id);
+            /* If the swap-in operation fails, return NULL. */
+            if (val == NULL)
+                return NULL;
+
+            /* Remove the key from the cold filter. */
+            cuckooFilterDelete(&server.swap->cold_filter[db->id], key->ptr, sdslen(key->ptr));
+            db->cold_data_size--;
+
+            /* Update the access time for the ageing algorithm.
+             * Don't do it if we have a saving child, as this will trigger
+             * a copy on write madness. */
+            if (!hasActiveChildProcess() && !(flags & LOOKUP_NOTOUCH)){
+                serverAssert(server.swap->hotmemory_policy == SWAP_HOTMEMORY_FLAG_LFU);
+                updateLFU(val);
+            }
+            db->stat_total_lookup_count++;
+            return val;
+        }
+        /* Key not found, return NULL. */
         return NULL;
     }
 }
@@ -177,6 +204,7 @@ robj *lookupKeyWriteOrReply(client *c, robj *key, robj *reply) {
 void dbAdd(redisDb *db, robj *key, robj *val) {
     sds copy = sdsdup(key->ptr);
     int retval = dictAdd(db->dict, copy, val);
+    if (server.swap_enabled) setVersion(val, getGblVersion());
 
     serverAssertWithInfo(NULL,key,retval == DICT_OK);
     signalKeyAsReady(db, key, val->type);
@@ -215,6 +243,7 @@ void dbOverwrite(redisDb *db, robj *key, robj *val) {
     if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
         val->lru = old->lru;
     }
+    if (server.swap_enabled) setVersion(val, getGblVersion());
     /* Although the key is not really deleted from the database, we regard 
     overwrite as two steps of unlink+add, so we still need to call the unlink 
     callback of the module. */
@@ -267,14 +296,51 @@ robj *dbRandomKey(redisDb *db) {
 
     while(1) {
         sds key;
-        robj *keyobj;
+        robj *keyobj = NULL;
 
-        de = dictGetFairRandomKey(db->dict);
-        if (de == NULL) return NULL;
+        if (server.swap_enabled && db->cold_data_size) {
+            size_t totalsize = dictSize(db->dict) + db->cold_data_size;
+            size_t random = rand() % totalsize;
+            if (random >= dictSize(db->dict)) {
+                char *key_buf;
+                size_t step, klen;
+                rocksdb_iterator_t *iter =
+                    rocksdb_create_iterator_cf(server.swap->rocks->db,
+                                               server.swap->rocks->ropts,
+                                               server.swap->rocks->cf_handles[DB_CF(db->id)]);
+                random = rand() % db->cold_data_size;
+                if (random < db->cold_data_size / 2) {
+                    rocksdb_iter_seek_to_first(iter);
+                    step = 0;
+                }
+                else {
+                    rocksdb_iter_seek_to_last(iter);
+                    step = db->cold_data_size - 1;
+                }
+                while (rocksdb_iter_valid(iter)) {
+                    if (step == random) break;
+                    if (random < db->cold_data_size / 2) {
+                        rocksdb_iter_next(iter);
+                        step++;
+                    }
+                    else {
+                        rocksdb_iter_prev(iter);
+                        step--;
+                    }
+                }
+                key_buf = (char *)rocksdb_iter_key(iter, &klen);
+                keyobj = createStringObject(key_buf, klen);
+            }
+        }
 
-        key = dictGetKey(de);
-        keyobj = createStringObject(key,sdslen(key));
-        if (dictFind(db->expires,key)) {
+        if (keyobj == NULL) {
+            de = dictGetFairRandomKey(db->dict);
+            if (de == NULL) return NULL;
+            
+            key = dictGetKey(de);
+            keyobj = createStringObject(key,sdslen(key));
+        }
+        if (dictFind(db->expires,keyobj->ptr)) {
             if (allvolatile && server.masterhost && --maxtries == 0) {
                 /* If the DB is composed only of keys with an expire set,
                  * it could happen that all the keys are already logically
@@ -385,6 +451,32 @@ long long emptyDbStructure(redisDb *dbarray, int dbnum, int async,
             dictEmpty(dbarray[j].dict,callback);
             dictEmpty(dbarray[j].expires,callback);
         }
+
+        if (server.swap_enabled && dbarray[j].cold_data_size) {
+            sds name;
+            char *err = NULL;
+            rocksdb_drop_column_family(server.swap->rocks->db, server.swap->rocks->cf_handles[DB_CF(j)], &err);
+            if (err != NULL) {
+                serverLog(LL_WARNING, "Failed to drop column family: %s", err);
+                zlibc_free(err);
+                return -1;
+            }
+            name = sdscatfmt(sdsempty(), "db%i", j);
+            server.swap->rocks->cf_handles[DB_CF(j)] =
+                rocksdb_create_column_family(server.swap->rocks->db, server.swap->rocks->db_opts, name, &err);
+            if (err != NULL) {
+                serverLog(LL_WARNING, "Failed to create column family: %s", err);
+                zlibc_free(err);
+                sdsfree(name);
+                return -1;
+            }
+            sdsfree(name);
+            removed += dbarray[j].cold_data_size;
+
+            cuckooFilterClear(&server.swap->cold_filter[j]);
+            dbarray[j].cold_data_size = 0;
+        }
+
         /* Because all keys of database are removed, reset average ttl. */
         dbarray[j].avg_ttl = 0;
         dbarray[j].expires_cursor = 0;
@@ -543,7 +635,7 @@ long long dbTotalServerKeyCount() {
     long long total = 0;
     int j;
     for (j = 0; j < server.dbnum; j++) {
-        total += dictSize(server.db[j].dict);
+        total += dictSize(server.db[j].dict) + server.db[j].cold_data_size;
     }
     return total;
 }
@@ -618,7 +710,11 @@ void flushAllDataAndResetRDB(int flags) {
         int saved_dirty = server.dirty;
         rdbSaveInfo rsi, *rsiptr;
         rsiptr = rdbPopulateSaveInfo(&rsi);
-        rdbSave(server.rdb_filename,rsiptr);
+        if (server.swap_enabled) {
+            swapHotmemorySave();
+        } else {
+            rdbSave(server.rdb_filename,rsiptr);
+        }
         server.dirty = saved_dirty;
     }
 
@@ -668,12 +764,17 @@ void delGenericCommand(client *c, int lazy) {
 
     for (j = 1; j < c->argc; j++) {
         expireIfNeeded(c->db,c->argv[j]);
-        int deleted  = lazy ? dbAsyncDelete(c->db,c->argv[j]) :
+        int deleted = lazy ? dbAsyncDelete(c->db,c->argv[j]) :
                               dbSyncDelete(c->db,c->argv[j]);
+        deleted |= server.swap_enabled &&
+            cuckooFilterContains(&server.swap->cold_filter[c->db->id],
+                                 c->argv[j]->ptr,
+                                 sdslen(c->argv[j]->ptr));
         if (deleted) {
             signalModifiedKey(c,c->db,c->argv[j]);
             notifyKeyspaceEvent(NOTIFY_GENERIC,
                 "del",c->argv[j],c->db->id);
+            swapDel(c->argv[j], c->db->id);
             server.dirty++;
             numdel++;
         }
@@ -754,6 +855,35 @@ void keysCommand(client *c) {
         }
     }
     dictReleaseIterator(di);
+
+    if (server.swap_enabled) {
+        rocksdb_iterator_t *iter =
+            rocksdb_create_iterator_cf(server.swap->rocks->db,
+                                       server.swap->rocks->ropts,
+                                       server.swap->rocks->cf_handles[DB_CF(c->db->id)]);
+        for (rocksdb_iter_seek_to_first(iter);
+             rocksdb_iter_valid(iter);
+             rocksdb_iter_next(iter)) {
+            robj *keyobj;
+            size_t klen;
+            char *key_buf = (char *)rocksdb_iter_key(iter, &klen);
+
+            if (!cuckooFilterContains(&server.swap->cold_filter[c->db->id], key_buf, klen)) {
+                continue;
+            }
+
+            if (allkeys || stringmatchlen(pattern,plen,key_buf,klen,0)) {
+                keyobj = createStringObject(key_buf,klen);
+                if (!keyIsExpired(c->db,keyobj)) {
+                    addReplyBulk(c,keyobj);
+                    numkeys++;
+                }
+                decrRefCount(keyobj);
+            }
+        }
+        rocksdb_iter_destroy(iter);
+    }
+
     setDeferredArrayLen(c,replylen,numkeys);
 }
 
@@ -907,11 +1037,51 @@ void scanGenericCommand(client *c, robj *o, unsigned long cursor) {
          * it is possible to fetch more data in a type-dependent way. */
         privdata[0] = keys;
         privdata[1] = o;
-        do {
-            cursor = dictScan(ht, cursor, scanCallback, NULL, privdata);
-        } while (cursor &&
-              maxiterations-- &&
-              listLength(keys) < (unsigned long)count);
+        if (!server.swap_enabled ||
+            (server.swap_enabled && c->cold_data_iter_cursor[c->db->id] == 0)) {
+            do {
+                cursor = dictScan(ht, cursor, scanCallback, NULL, privdata);
+            } while (cursor &&
+                maxiterations-- &&
+                listLength(keys) < (unsigned long)count);
+        }
+        /* Initialize the iterator if needed. */
+        if (server.swap_enabled &&
+            cursor == 0 &&
+            c->cold_data_iter_cursor[c->db->id] == 0) {
+            c->cold_data_iter_cursor[c->db->id] = c->db->cold_data_size;
+            cursor = c->cold_data_iter_cursor[c->db->id];
+            c->cold_data_iters[c->db->id] =
+                rocksdb_create_iterator_cf(server.swap->rocks->db,
+                                           server.swap->rocks->ropts,
+                                           server.swap->rocks->cf_handles[DB_CF(c->db->id)]);
+            rocksdb_iter_seek_to_first(c->cold_data_iters[c->db->id]);
+        }
+
+        /* If we are in swap mode, we need to iterate the cold data. */
+        if (server.swap_enabled &&
+            c->cold_data_iter_cursor[c->db->id] &&
+            listLength(keys) < (unsigned long)count) {
+            if (cursor != c->cold_data_iter_cursor[c->db->id]){
+                addReplyError(c, "Invalid cursor of scan command");
+                goto cleanup;
+            }
+            while (rocksdb_iter_valid(c->cold_data_iters[c->db->id]) &&
+                   listLength(keys) < (unsigned long)count) {
+                size_t klen;
+                char *key_buf = (char *)rocksdb_iter_key(c->cold_data_iters[c->db->id], &klen);
+                robj *kobj = createStringObject(key_buf, klen);
+                listAddNodeTail(keys, kobj);
+                rocksdb_iter_next(c->cold_data_iters[c->db->id]);
+                c->cold_data_iter_cursor[c->db->id]--;
+            }
+            if (!rocksdb_iter_valid(c->cold_data_iters[c->db->id])) {
+                rocksdb_iter_destroy(c->cold_data_iters[c->db->id]);
+                c->cold_data_iters[c->db->id] = NULL;
+                c->cold_data_iter_cursor[c->db->id] = 0;
+            }
+            cursor = c->cold_data_iter_cursor[c->db->id];
+        }
     } else if (o->type == OBJ_SET) {
         int pos = 0;
         int64_t ll;
@@ -1016,7 +1186,7 @@ void scanCommand(client *c) {
 }
 
 void dbsizeCommand(client *c) {
-    addReplyLongLong(c,dictSize(c->db->dict));
+    addReplyLongLong(c,dictSize(c->db->dict)+c->db->cold_data_size);
 }
 
 void lastsaveCommand(client *c) {
@@ -1109,6 +1279,8 @@ void renameGenericCommand(client *c, int nx) {
         c->argv[1],c->db->id);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"rename_to",
         c->argv[2],c->db->id);
+    swapDel(c->argv[1], c->db->id);
+    swapOut(c->argv[2], o, c->db->id);
     server.dirty++;
     addReply(c,nx ? shared.cone : shared.ok);
 }
@@ -1176,9 +1348,10 @@ void moveCommand(client *c) {
     signalModifiedKey(c,dst,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_GENERIC,
                 "move_from",c->argv[1],src->id);
+    swapDel(c->argv[1], src->id);
     notifyKeyspaceEvent(NOTIFY_GENERIC,
                 "move_to",c->argv[1],dst->id);
-
+    swapOut(c->argv[1], o, dst->id);
     server.dirty++;
     addReply(c,shared.cone);
 }
@@ -1280,7 +1453,7 @@ void copyCommand(client *c) {
     /* OK! key copied */
     signalModifiedKey(c,dst,c->argv[2]);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"copy_to",c->argv[2],dst->id);
-
+    swapOut(c->argv[2], newobj, c->db->id);
     server.dirty++;
     addReply(c,shared.cone);
 }
@@ -1356,6 +1529,11 @@ void swapdbCommand(client *c) {
         addReplyError(c,"SWAPDB is not allowed in cluster mode");
         return;
     }
+    /* Not allowed in swap mode: swap cost is too high. */
+    if (server.swap_enabled) {
+        addReplyError(c,"SWAPDB is not allowed in swap mode");
+        return;
+    }
 
     /* Get the two DBs indexes. */
     if (getIntFromObjectOrReply(c, c->argv[1], &id1,
@@ -1385,7 +1563,13 @@ void swapdbCommand(client *c) {
 int removeExpire(redisDb *db, robj *key) {
     /* An expire may only be removed if there is a corresponding entry in the
      * main dict. Otherwise, the key will never be freed. */
-    serverAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
+    if (server.swap_enabled) {
+        int exists = dictFind(db->dict,key->ptr) != NULL || 
+            cuckooFilterContains(&server.swap->cold_filter[db->id],key->ptr,sdslen(key->ptr));
+        serverAssertWithInfo(NULL,key,exists);
+    } else {
+        serverAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
+    }
     return dictDelete(db->expires,key->ptr) == DICT_OK;
 }
 
@@ -1395,15 +1579,29 @@ int removeExpire(redisDb *db, robj *key) {
  * after which the key will no longer be considered valid. */
 void setExpire(client *c, redisDb *db, robj *key, long long when) {
     serverAssert(threadOwnLock());
-    dictEntry *kde, *de;
+    dictEntry *kde, *de, *existing;
 
     {   
         /* Reuse the sds from the main dict in the expire dict */
         WRAPPER_MUTEX_LOCK(gl, &globalLock);
-        kde = dictFind(db->dict,key->ptr);
-        serverAssertWithInfo(NULL,key,kde != NULL);
-        de = dictAddOrFind(db->expires,dictGetKey(kde));
-        dictSetSignedIntegerVal(de,when);
+
+        if (server.swap_enabled) {
+            serverAssertWithInfo(NULL,key, dictFind(db->dict,key->ptr) != NULL ||
+                cuckooFilterContains(&server.swap->cold_filter[db->id],key->ptr,sdslen(key->ptr)));
+            de = dictAddRaw(db->expires, key->ptr, &existing);
+            if (de) {
+                sds copy = sdsdup(key->ptr);
+                dictSetKey(db->expires, de, copy);
+                dictSetSignedIntegerVal(de, when);
+            } else {
+                dictSetSignedIntegerVal(existing, when);
+            }
+        } else {
+            kde = dictFind(db->dict,key->ptr);
+            serverAssertWithInfo(NULL,key,kde != NULL);
+            de = dictAddOrFind(db->expires,dictGetKey(kde));
+            dictSetSignedIntegerVal(de,when);
+        }
     }
 
     int writable_slave = server.masterhost && server.repl_slave_ro == 0;
@@ -1422,7 +1620,13 @@ long long getExpire(redisDb *db, robj *key) {
 
     /* The entry was found in the expire dict, this means it should also
      * be present in the main dict (safety check). */
-    serverAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
+    if (server.swap_enabled) {
+        int exists = dictFind(db->dict,key->ptr) != NULL || 
+            cuckooFilterContains(&server.swap->cold_filter[db->id],key->ptr,sdslen(key->ptr));
+        serverAssertWithInfo(NULL,key,exists);
+    } else {
+        serverAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
+    }
     return dictGetSignedIntegerVal(de);
 }
 
@@ -1437,6 +1641,10 @@ void deleteExpiredKeyAndPropagate(redisDb *db, robj *keyobj) {
     latencyEndMonitor(expire_latency);
     latencyAddSampleIfNeeded("expire-del",expire_latency);
     notifyKeyspaceEvent(NOTIFY_EXPIRED,"expired",keyobj,db->id);
+    if (server.swap_enabled) {
+        swapDataEntry *entry = swapDataEntryCreate(SWAP_DEL, db->id, keyobj, NULL, -1, 0);
+        swapDataEntrySubmit(entry, -1, 1);
+    }
     signalModifiedKey(NULL, db, keyobj);
     propagateExpire(db,keyobj,server.lazyfree_lazy_expire);
     server.stat_expiredkeys++;

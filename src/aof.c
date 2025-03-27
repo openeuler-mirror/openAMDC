@@ -13,6 +13,7 @@
 #include "server.h"
 #include "bio.h"
 #include "rio.h"
+#include "swap.h"
 
 #include <signal.h>
 #include <fcntl.h>
@@ -1526,6 +1527,13 @@ int rewriteAppendOnlyFileRio(rio *aof) {
         }
         dictReleaseIterator(di);
         di = NULL;
+
+        /* If swap functionality is enabled. */
+        if (server.swap_enabled) {
+            /* Perform swap operation to write data into the append only file. */
+            if (swapIterateGenerateAppendOnlyFile(aof, j, key_count, processed, updated_time) == C_ERR)
+                goto werr;
+        }
     }
     return C_OK;
 

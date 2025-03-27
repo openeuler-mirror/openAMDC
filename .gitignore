@@ -37,4 +37,9 @@ Makefile.dep
 .ccls-cache/*
 compile_commands.json
 openamdc.code-workspace
-rocksdb.data
+rocksdb.dir
+temp-*.rdb
+!pkg/rpm/centos/openamdc_build/openamdc_rpm/etc/systemd/system/openamdc.service.d
+!pkg/rpm/centos/openamdc_build/openamdc_rpm/etc/systemd/system/openamdc-sentinel.service.d
+!pkg/rpm/openeuler/openamdc_build/openamdc_rpm/etc/systemd/system/openamdc.service.d
+!pkg/rpm/openeuler/openamdc_build/openamdc_rpm/etc/systemd/system/openamdc-sentinel.service.d

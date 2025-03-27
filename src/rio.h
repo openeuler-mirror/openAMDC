@@ -52,6 +52,12 @@ struct _rio {
             sds ptr;
             off_t pos;
         } buffer;
+        /* In-memory cbuffer target. */
+        struct {
+            char* ptr;
+            size_t len;
+            off_t pos;
+        } cbuffer;
         /* Stdio file pointer target. */
         struct {
             FILE *fp;
@@ -139,6 +145,7 @@ static inline void rioClearErrors(rio *r) {
 
 void rioInitWithFile(rio *r, FILE *fp);
 void rioInitWithBuffer(rio *r, sds s);
+void rioInitWithCBuffer(rio *r, char *ptr, size_t len);
 void rioInitWithConn(rio *r, connection *conn, size_t read_limit);
 void rioInitWithFd(rio *r, int fd);
 
@@ -152,6 +159,12 @@ size_t rioWriteBulkDouble(rio *r, double d);
 
 struct redisObject;
 int rioWriteBulkObject(rio *r, struct redisObject *obj);
+int rewriteListObject(rio *r, struct redisObject *key, struct redisObject *o);
+int rewriteSetObject(rio *r, struct redisObject *key, struct redisObject *o);
+int rewriteSortedSetObject(rio *r, struct redisObject *key, struct redisObject *o);
+int rewriteHashObject(rio *r, struct redisObject *key, struct redisObject *o);
+int rewriteStreamObject(rio *r, struct redisObject *key, struct redisObject *o);
+int rewriteModuleObject(rio *r, struct redisObject *key, struct redisObject *o);
 
 void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len);
 void rioSetAutoSync(rio *r, off_t bytes);

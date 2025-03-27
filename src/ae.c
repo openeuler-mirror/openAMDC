@@ -23,6 +23,7 @@
 #include <time.h>
 #include <errno.h>
 #include <assert.h>
+#include <fcntl.h>
 
 #include "zmalloc.h"
 #include "config.h"
@@ -49,18 +50,18 @@ static void aeAsyncTaskProcess(aeEventLoop *eventLoop, int fd, void *clientData,
      * to global resources. */
     WRAPPER_MUTEX_DEFER_LOCK(wm, &globalLock);
    
-    struct aeAsyncTask cmd;
-    ssize_t cb = read(fd, &cmd, sizeof(struct aeAsyncTask));
-    if (cb != sizeof(cmd)) {
+    struct aeAsyncTask task;
+    ssize_t cb = read(fd, &task, sizeof(struct aeAsyncTask));
+    if (cb != sizeof(task)) {
         assert(errno == EAGAIN);
         return;
     }
 
     /* Attempts to acquire the lock if the command requires it
      * and the current thread does not own it. */
-    if (cmd.lock && !wrapperMutexOwnLock(&wm))
+    if (task.lock && !wrapperMutexOwnLock(&wm))
         wrapperMutexLock(&wm);
-    cmd.proc(cmd.var, cmd.callback);
+    task.proc(task.var, task.callback);
 }
 
 /* This function either directly invokes the specified asynchronous function if
@@ -72,18 +73,18 @@ int aeAsyncFunction(aeEventLoop *eventLoop, aeAsyncProc *proc, void *var, aeAsyn
         return AE_OK;
     }
 
-    struct aeAsyncTask cmd;
-    cmd.proc = proc;
-    cmd.lock = lock;
-    cmd.var = var;
-    cmd.callback = callback;
+    struct aeAsyncTask task;
+    task.proc = proc;
+    task.lock = lock;
+    task.var = var;
+    task.callback = callback;
 
-    ssize_t size = write(eventLoop->fdAsyncWrite, &cmd, sizeof(cmd));
+    ssize_t size = write(eventLoop->fdAsyncWrite, &task, sizeof(task));
     if (!eventLoop->stop) {
-        if (!(!size || size == sizeof(cmd))) {
+        if (!(!size || size == sizeof(task))) {
             printf("aeAsyncFunction error: %s\n", strerror(errno));
         }
-        assert(!size || size == sizeof(cmd));
+        assert(!size || size == sizeof(task));
     }
 
     return size > 0 ? AE_OK : AE_ERR;
@@ -134,7 +135,7 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
     if (pipe(rgfd) < 0) goto err;
     eventLoop->fdAsyncRead = rgfd[0];
     eventLoop->fdAsyncWrite = rgfd[1];
-    fcntl(eventLoop->fdAsyncRead, F_SETFL, O_NONBLOCK);
+    if (anetNonBlock(NULL, eventLoop->fdAsyncRead) == ANET_ERR) goto err;
     aeCreateFileEvent(eventLoop, eventLoop->fdAsyncRead, AE_READABLE | AE_READ_THREADSAFE,
                         aeAsyncTaskProcess, NULL);
     return eventLoop;

@@ -11,6 +11,7 @@
  */
 
 #include "server.h"
+#include "swap.h"
 #include "slowlog.h"
 #include "latency.h"
 #include "monotonic.h"
@@ -283,6 +284,7 @@ void serveClientsBlockedOnListKey(robj *o, readyList *rl) {
     if (listTypeLength(o) == 0) {
         dbDelete(rl->db,rl->key);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",rl->key,rl->db->id);
+        swapDel(rl->key, rl->db->id);
     }
     /* We don't call signalModifiedKey() as it was already called
      * when an element was pushed on the list. */

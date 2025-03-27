@@ -13,6 +13,7 @@
 #include "server.h"
 #include "monotonic.h"
 #include "cluster.h"
+#include "swap.h"
 #include "slowlog.h"
 #include "bio.h"
 #include "latency.h"
@@ -1093,7 +1094,11 @@ struct redisCommand redisCommandTable[] = {
 
     {"failover",failoverCommand,-1,
      "admin no-script ok-stale",
-     0,NULL,0,0,0,0,0,0}
+     0,NULL,0,0,0,0,0,0},
+    
+    {"swap",swapCommand,-2,
+     "admin no-script",
+     0,NULL,0,0,0,0,0,0},
 };
 
 /*============================ Utility functions ============================ */
@@ -1338,7 +1343,10 @@ uint64_t dictEncObjHash(const void *key) {
  * if dict load factor exceeds HASHTABLE_MAX_LOAD_FACTOR. */
 int dictExpandAllowed(size_t moreMem, double usedRatio) {
     if (usedRatio <= HASHTABLE_MAX_LOAD_FACTOR) {
-        return !overMaxmemoryAfterAlloc(moreMem);
+        if (server.swap_enabled)
+            return !overSwapHotmemoryAfterAlloc(moreMem);
+        else
+            return !overMaxmemoryAfterAlloc(moreMem);
     } else {
         return 1;
     }
@@ -2181,13 +2189,14 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     if (server.verbosity <= LL_VERBOSE) {
         run_with_period(5000) {
             for (j = 0; j < server.dbnum; j++) {
-                long long size, used, vkeys;
+                long long hotkeys, coldkeys, allkeys, vkeys;
 
-                size = dictSlots(server.db[j].dict);
-                used = dictSize(server.db[j].dict);
+                hotkeys = dictSize(server.db[j].dict);
+                coldkeys = server.db[j].cold_data_size;
+                allkeys = hotkeys + coldkeys;
                 vkeys = dictSize(server.db[j].expires);
-                if (used || vkeys) {
-                    serverLog(LL_VERBOSE,"DB %d: %lld keys (%lld volatile) in %lld slots HT.",j,used,vkeys,size);
+                if (hotkeys || coldkeys || vkeys) {
+                    serverLog(LL_VERBOSE,"DB %d: %lld keys (%lld volatile), %lld hot keys, %lld cold keys.",j,allkeys,vkeys,hotkeys,coldkeys);
                 }
             }
         }
@@ -2205,9 +2214,15 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
 next:
-    /* Perform memory evictions if a maximum memory limit is configured */
-    if (server.maxmemory)
-        performEvictions();
+    if (server.swap_enabled) {
+        /* Perform swap data if a hot memory limit is configured */
+        if (server.swap_hotmemory)
+            performSwapData();
+    } else {
+        /* Perform memory evictions if a maximum memory limit is configured */
+        if (server.maxmemory)
+            performEvictions();
+    }
 
     /* We need to do a few operations on clients asynchronously. */
     clientsCron(threadId);
@@ -2237,25 +2252,27 @@ next:
     } else {
         /* If there is not a background saving/rewrite in progress check if
          * we have to save/rewrite now. */
-        for (j = 0; j < server.saveparamslen; j++) {
-            struct saveparam *sp = server.saveparams+j;
+        if (!server.swap_enabled) {
+            for (j = 0; j < server.saveparamslen; j++) {
+                struct saveparam *sp = server.saveparams+j;
 
-            /* Save if we reached the given amount of changes,
-             * the given amount of seconds, and if the latest bgsave was
-             * successful or if, in case of an error, at least
-             * CONFIG_BGSAVE_RETRY_DELAY seconds already elapsed. */
-            if (server.dirty >= sp->changes &&
-                server.unixtime-server.lastsave > sp->seconds &&
-                (server.unixtime-server.lastbgsave_try >
-                 CONFIG_BGSAVE_RETRY_DELAY ||
-                 server.lastbgsave_status == C_OK))
-            {
-                serverLog(LL_NOTICE,"%d changes in %d seconds. Saving...",
-                    sp->changes, (int)sp->seconds);
-                rdbSaveInfo rsi, *rsiptr;
-                rsiptr = rdbPopulateSaveInfo(&rsi);
-                rdbSaveBackground(server.rdb_filename,rsiptr);
-                break;
+                /* Save if we reached the given amount of changes,
+                * the given amount of seconds, and if the latest bgsave was
+                * successful or if, in case of an error, at least
+                * CONFIG_BGSAVE_RETRY_DELAY seconds already elapsed. */
+                if (server.dirty >= sp->changes &&
+                    server.unixtime-server.lastsave > sp->seconds &&
+                    (server.unixtime-server.lastbgsave_try >
+                    CONFIG_BGSAVE_RETRY_DELAY ||
+                    server.lastbgsave_status == C_OK))
+                {
+                    serverLog(LL_NOTICE,"%d changes in %d seconds. Saving...",
+                        sp->changes, (int)sp->seconds);
+                    rdbSaveInfo rsi, *rsiptr;
+                    rsiptr = rdbPopulateSaveInfo(&rsi);
+                    rdbSaveBackground(server.rdb_filename,rsiptr);
+                    break;
+                }
             }
         }
 
@@ -3293,10 +3310,15 @@ static void initNetworkingForThread(int iel) {
 }
 
 void *workerThread(void *arg) {
+    char name[20];
     int iel = (int)((int64_t)arg);
     threadId = iel;
-    tlsInitThread();
 
+    /* Set the thread's name for identification purposes. */
+    snprintf(name, sizeof(name), "worker_thd:#%d", iel);
+    redis_set_thread_title(name);
+
+    tlsInitThread();
     if (iel != MAIN_THREAD_ID) {
         WRAPPER_MUTEX_LOCK(gl, &globalLock);
         initNetworkingForThread(iel);
@@ -3310,8 +3332,14 @@ void *workerThread(void *arg) {
 }
 
 void *moduleThread(void *arg) {
+    char name[20];
     int iel = (int)((int64_t)arg);
     threadId = iel;
+
+    /* Set the thread's name for identification purposes. */
+    snprintf(name, sizeof(name), "module_thd:#%d", iel);
+    redis_set_thread_title(name);
+
     tlsInitThread();
     aeMain(server.el[iel]);
     aeDeleteEventLoop(server.el[iel]);
@@ -3381,6 +3409,14 @@ void initServer(void) {
         server.db[j].avg_ttl = 0;
         server.db[j].defrag_later = listCreate();
         listSetFreeMethod(server.db[j].defrag_later,(void (*)(void*))sdsfree);
+        server.db[j].cold_data_size = 0;
+        server.db[j].stat_total_lookup_count = 0;
+        server.db[j].stat_hit_ram_count = 0;
+        server.db[j].stat_swap_in_empty_keys_skipped = 0;
+        server.db[j].stat_swap_in_expired_keys_skipped = 0;
+        server.db[j].stat_swap_in_keys_total = 0;
+        server.db[j].stat_swap_out_keys_total = 0;
+        server.db[j].stat_swap_del_keys_total = 0;
     }
 
     evictionPoolAlloc(); /* Initialize the LRU keys pool. */
@@ -3546,6 +3582,7 @@ void initServer(void) {
  * see: https://sourceware.org/bugzilla/show_bug.cgi?id=19329 */
 void InitServerLast() {
     bioInit();
+    if (server.swap_enabled) swapInit();
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
     server.initial_memory_usage = zmalloc_used_memory();
 }
@@ -3901,6 +3938,8 @@ void call(client *c, int flags) {
     if (server.fixed_time_expire[threadId]++ == 0) {
         updateCachedTimeWithUs(0,call_timer);
     }
+
+    incrGblVersion();
 
     monotime monotonic_start = 0;
     if (monotonicGetType() == MONOTONIC_CLOCK_HW)
@@ -4567,7 +4606,7 @@ int prepareForShutdown(int flags) {
     }
 
     /* Create a new RDB file before exiting. */
-    if ((server.saveparamslen > 0 && !nosave) || save) {
+    if (!server.swap_enabled && ((server.saveparamslen > 0 && !nosave) || save)) {
         serverLog(LL_NOTICE,"Saving the final RDB snapshot before exiting.");
         if (server.supervised_mode == SUPERVISED_SYSTEMD)
             redisCommunicateSystemd("STATUS=Saving the final RDB snapshot\n");
@@ -4585,6 +4624,16 @@ int prepareForShutdown(int flags) {
                 redisCommunicateSystemd("STATUS=Error trying to save the DB, can't exit.\n");
             return C_ERR;
         }
+    }
+
+    /* Swap the data to RocksDB before exiting. */
+    if (server.swap_enabled) {
+        serverLog(LL_NOTICE,"Swapping the data to RocksDB before exiting.");
+        if (server.supervised_mode == SUPERVISED_SYSTEMD)
+            redisCommunicateSystemd("STATUS=Swapping the data to RocksDB\n");
+        
+        /* Release the memory and swap the data to RocksDB */
+        swapRelease();
     }
 
     /* Fire the shutdown modules event. */
@@ -5529,6 +5578,7 @@ sds genRedisInfoString(const char *section) {
         }
         dictReleaseIterator(di);
     }
+
     /* Error statistics */
     if (allsections || defsections || !strcasecmp(section,"errorstats")) {
         if (sections++) info = sdscat(info,"\r\n");
@@ -5565,11 +5615,33 @@ sds genRedisInfoString(const char *section) {
             long long keys, vkeys;
 
             keys = dictSize(server.db[j].dict);
+            if (server.swap_enabled) keys += server.db[j].cold_data_size;
             vkeys = dictSize(server.db[j].expires);
             if (keys || vkeys) {
-                info = sdscatprintf(info,
-                    "db%d:keys=%lld,expires=%lld,avg_ttl=%lld\r\n",
-                    j, keys, vkeys, server.db[j].avg_ttl);
+                if (server.swap_enabled) {
+                    float keys_in_ram_radio = (dictSize(server.db[j].dict) * 100.0) / keys;
+                    float ram_hit_radio = server.db[j].stat_total_lookup_count == 0
+                        ? 0 : (server.db[j].stat_hit_ram_count * 100.0) / server.db[j].stat_total_lookup_count;
+                    info = sdscatprintf(info,
+                        "db%d:keys=%lld,expires=%lld,avg_ttl=%lld,"
+                        "keys_in_ram_radio=%.2f%%,ram_hit_radio=%.2f%%,"
+                        "swap_in_keys_total:%lld,"
+                        "swap_in_empty_keys_skipped:%lld,"
+                        "swap_in_expired_keys_skipped:%lld,"
+                        "swap_out_keys_total:%lld,"
+                        "swap_del_keys_total:%lld\r\n",
+                        j, keys, vkeys, server.db[j].avg_ttl,
+                        keys_in_ram_radio, ram_hit_radio,
+                        server.db[j].stat_swap_in_keys_total,
+                        server.db[j].stat_swap_in_empty_keys_skipped,
+                        server.db[j].stat_swap_in_expired_keys_skipped,
+                        server.db[j].stat_swap_out_keys_total,
+                        server.db[j].stat_swap_del_keys_total);
+                } else {
+                    info = sdscatprintf(info,
+                        "db%d:keys=%lld,expires=%lld,avg_ttl=%lld\r\n",
+                        j, keys, vkeys, server.db[j].avg_ttl);
+                }
             }
         }
     }
@@ -5583,6 +5655,70 @@ sds genRedisInfoString(const char *section) {
                                   everything || modules ? NULL: section,
                                   0, /* not a crash report */
                                   sections);
+    }
+
+    if (allsections || defsections || !strcasecmp(section,"swap")) {
+        if (sections++) info = sdscat(info,"\r\n");
+        info = sdscatprintf(info,
+            "# Swap\r\n"
+            "swap_enabled:%d\r\n",
+            server.swap_enabled);
+
+        if (server.swap_enabled) {
+            info = sdscatprintf(info,
+                "swap-flush-threads-num:%d\r\n"
+                "swap-data-entry-batch-size:%d\r\n"
+                "swap-hotmemory:%lld\r\n"
+                "swap-hotmemory-samples:%d\r\n"
+                "swap-hotmemory-eviction-tenacity:%d\r\n"
+                "swap-cuckoofilter-size-for-level:%lld\r\n"
+                "swap-cuckoofilter-bucket-size:%d\r\n"
+                "swap-purge-rocksdb-after-load:%d\r\n",
+                server.swap_flush_threads_num,
+                server.swap_data_entry_batch_size,
+                server.swap_hotmemory,
+                server.swap_hotmemory_samples,
+                server.swap_hotmemory_eviction_tenacity,
+                server.swap_cuckoofilter_size_for_level,
+                server.swap_cuckoofilter_bucket_size,
+                server.swap_purge_rocksdb_after_load);
+
+            for (j = 0; j < server.dbnum; j++) {
+                long long keys, vkeys;
+
+                keys = dictSize(server.db[j].dict);
+                if (server.swap_enabled) keys += server.db[j].cold_data_size;
+                vkeys = dictSize(server.db[j].expires);
+                if (keys || vkeys) {
+                    cuckooFilterStat stat;
+                    cuckooFilterGetStat(&server.swap->cold_filter[j], &stat);
+                    info = sdscatprintf(info,
+                        "cuckoo_filter%d:"
+                        "cuckoo_filter_num_items:%ld,"
+                        "cuckoo_filter_num_deletes:%ld,"
+                        "cuckoo_filter_used_memory:%lu,"
+                        "cuckoo_filter_num_filters:%d,"
+                        "cuckoo_filter_bucket_size:%d,"
+                        "cuckoo_filter_max_iterations:%d,"
+                        "cuckoo_filter_load_factor:%lf\r\n",
+                        j,
+                        stat.numItems,
+                        stat.numDeletes,
+                        stat.used_memory,
+                        stat.numFilters,
+                        stat.bucketSize,
+                        stat.maxIterations,
+                        stat.load_factor);
+                }
+            }
+
+            rocksdb_options_enable_statistics(server.swap->rocks->db_opts);
+            char* rocks_stats = rocksdb_property_value(server.swap->rocks->db, "rocksdb.stats");
+            if (rocks_stats != NULL) {
+                info = sdscatprintf(info, "rocksdb_stats:%s\r\n", rocks_stats);
+                zlibc_free(rocks_stats);
+            }
+        }
     }
     return info;
 }
@@ -6184,41 +6320,77 @@ int checkForSentinelMode(int argc, char **argv) {
     return 0;
 }
 
-/* Function called at startup to load RDB or AOF file in memory. */
+/* Returns 1 if there is --check-rdb among the arguments or if
+ * argv[0] contains "check-rdb". */
+int checkForRDBMode(int argc, char **argv) {
+    int j;
+
+    if (strstr(argv[0],"openamdc-check-rdb") != NULL) return 1;
+    for (j = 1; j < argc; j++)
+        if (!strcmp(argv[j],"--check-rdb")) return 1;
+    return 0;
+}
+
+/* Returns 1 if there is --check-rdb among the arguments or if
+ * argv[0] contains "check-rdb". */
+int checkForAOFMode(int argc, char **argv) {
+    int j;
+
+    if (strstr(argv[0],"openamdc-check-aof") != NULL) return 1;
+    for (j = 1; j < argc; j++)
+        if (!strcmp(argv[j],"--check-aof")) return 1;
+    return 0;
+}
+
+/* Function called at startup to load RDB or AOF or rocksdb file in memory. */
 void loadDataFromDisk(void) {
     long long start = ustime();
-    if (server.aof_state == AOF_ON) {
-        if (loadAppendOnlyFile(server.aof_filename) == C_OK)
-            serverLog(LL_NOTICE,"DB loaded from append only file: %.3f seconds",(float)(ustime()-start)/1000000);
-    } else {
-        rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
-        errno = 0; /* Prevent a stale value from affecting error checking */
-        if (rdbLoad(server.rdb_filename,&rsi,RDBFLAGS_NONE) == C_OK) {
-            serverLog(LL_NOTICE,"DB loaded from disk: %.3f seconds",
-                (float)(ustime()-start)/1000000);
-
-            /* Restore the replication ID / offset from the RDB file. */
-            if ((server.masterhost ||
-                (server.cluster_enabled &&
-                nodeIsSlave(server.cluster->myself))) &&
-                rsi.repl_id_is_set &&
-                rsi.repl_offset != -1 &&
-                /* Note that older implementations may save a repl_stream_db
-                 * of -1 inside the RDB file in a wrong way, see more
-                 * information in function rdbPopulateSaveInfo. */
-                rsi.repl_stream_db != -1)
-            {
-                memcpy(server.replid,rsi.repl_id,sizeof(server.replid));
-                server.master_repl_offset = rsi.repl_offset;
-                /* If we are a slave, create a cached master from this
-                 * information, in order to allow partial resynchronizations
-                 * with masters. */
-                replicationCacheMasterUsingMyself();
-                selectDb(server.cached_master,rsi.repl_stream_db);
-            }
-        } else if (errno != ENOENT) {
-            serverLog(LL_WARNING,"Fatal error loading the DB: %s. Exiting.",strerror(errno));
+    if (server.swap_enabled) {
+        int retval;
+        startLoadingRocksdb(server.swap_hotmemory);
+        retval = swapHotMemoryLoad();
+        stopLoadingRocksdb(retval == C_OK);
+        if (retval == C_OK) {
+            serverLog(LL_NOTICE, "DB loaded from rocksdb: %.3f seconds", (float)(ustime()-start)/1000000);
+        } else {
+            serverLog(LL_WARNING, "Fatal error loading the rocksdb data. Exiting.");
+            rocksClose();
             exit(1);
+        }
+    } else {
+        if (server.aof_state == AOF_ON) {
+            if (loadAppendOnlyFile(server.aof_filename) == C_OK)
+                serverLog(LL_NOTICE,"DB loaded from append only file: %.3f seconds",(float)(ustime()-start)/1000000);
+        } else {
+            rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
+            errno = 0; /* Prevent a stale value from affecting error checking */
+            if (rdbLoad(server.rdb_filename,&rsi,RDBFLAGS_NONE) == C_OK) {
+                serverLog(LL_NOTICE,"DB loaded from disk: %.3f seconds",
+                    (float)(ustime()-start)/1000000);
+
+                /* Restore the replication ID / offset from the RDB file. */
+                if ((server.masterhost ||
+                    (server.cluster_enabled &&
+                    nodeIsSlave(server.cluster->myself))) &&
+                    rsi.repl_id_is_set &&
+                    rsi.repl_offset != -1 &&
+                    /* Note that older implementations may save a repl_stream_db
+                    * of -1 inside the RDB file in a wrong way, see more
+                    * information in function rdbPopulateSaveInfo. */
+                    rsi.repl_stream_db != -1)
+                {
+                    memcpy(server.replid,rsi.repl_id,sizeof(server.replid));
+                    server.master_repl_offset = rsi.repl_offset;
+                    /* If we are a slave, create a cached master from this
+                    * information, in order to allow partial resynchronizations
+                    * with masters. */
+                    replicationCacheMasterUsingMyself();
+                    selectDb(server.cached_master,rsi.repl_stream_db);
+                }
+            } else if (errno != ENOENT) {
+                serverLog(LL_WARNING,"Fatal error loading the DB: %s. Exiting.",strerror(errno));
+                exit(1);
+            }
         }
     }
 }
@@ -6411,7 +6583,8 @@ struct redisTest {
     {"crc64", crc64Test},
     {"zmalloc", zmalloc_test},
     {"sds", sdsTest},
-    {"dict", dictTest}
+    {"dict", dictTest},
+    {"cuckoofilter", cuckooFilterTest}
 };
 redisTestProc *getTestProcByName(const char *name) {
     int numtests = sizeof(redisTests)/sizeof(struct redisTest);
@@ -6519,9 +6692,9 @@ int main(int argc, char **argv) {
     /* Check if we need to start in openamdc-check-rdb/aof mode. We just execute
      * the program main. However the program is part of the openAMDC executable
      * so that we can easily execute an RDB check on loading errors. */
-    if (strstr(argv[0],"openamdc-check-rdb") != NULL)
+    if (checkForRDBMode(argc, argv))
         redis_check_rdb_main(argc,argv,NULL);
-    else if (strstr(argv[0],"openamdc-check-aof") != NULL)
+    else if (checkForAOFMode(argc, argv))
         redis_check_aof_main(argc,argv);
 
     if (argc >= 2) {
@@ -6682,12 +6855,19 @@ int main(int argc, char **argv) {
 
     pthread_attr_t tattr;
     pthread_attr_init(&tattr);
-    pthread_attr_setstacksize(&tattr, 1 << 23);
+    pthread_attr_setstacksize(&tattr, 1 << 23);  /* Set stack size to 8MB */
     for (int iel = 0; iel < server.worker_threads_num; ++iel) {
-        pthread_create(server.thread + iel, &tattr, workerThread, (void *)((int64_t)iel));
+        if (pthread_create(server.thread + iel, &tattr, workerThread, (void *)((int64_t)iel)) != 0) {
+            serverLog(LL_WARNING,"Fatal: Can't initialize workerThread.");
+            exit(1);
+        }
     }
-    if (server.worker_threads_num > 1)
-        pthread_create(server.thread + MODULE_THREAD_ID, &tattr, moduleThread, (void *)((int64_t)MODULE_THREAD_ID));
+    if (server.worker_threads_num > 1) {
+        if (pthread_create(server.thread + MODULE_THREAD_ID, &tattr, moduleThread, (void *)((int64_t)MODULE_THREAD_ID)) != 0) {
+            serverLog(LL_WARNING,"Fatal: Can't initialize moduleThread.");
+            exit(1);
+        }
+    }
 
     /* Block SIGALRM from this thread, it should only be received on a worker thread */
     sigset_t sigset;

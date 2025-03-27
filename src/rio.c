@@ -70,6 +70,56 @@ void rioInitWithBuffer(rio *r, sds s) {
     r->io.buffer.pos = 0;
 }
 
+/* Returns 1 or 0 for success/failure. */
+static size_t rioCBufferWrite(rio *r, const void *buf, size_t len) {
+    r->io.cbuffer.ptr = zrealloc(r->io.cbuffer.ptr, r->io.cbuffer.len + len);
+    memcpy(r->io.cbuffer.ptr + r->io.cbuffer.len, buf, len);
+    r->io.cbuffer.len += len;
+    r->io.cbuffer.pos += len;
+    return 1;
+}
+
+/* Returns 1 or 0 for success/failure. */
+static size_t rioCBufferRead(rio *r, void *buf, size_t len) {
+    if (r->io.cbuffer.len-r->io.cbuffer.pos < len)
+        return 0; /* not enough buffer to return len bytes. */
+    memcpy(buf,r->io.cbuffer.ptr+r->io.cbuffer.pos,len);
+    r->io.cbuffer.pos += len;
+    return 1;
+}
+
+/* Returns read/write position in buffer. */
+static off_t rioCBufferTell(rio *r) {
+    return r->io.cbuffer.pos;
+}
+
+/* Flushes any buffer to target device if applicable. Returns 1 on success
+ * and 0 on failures. */
+static int rioCBufferFlush(rio *r) {
+    UNUSED(r);
+    return 1; /* Nothing to do, our write just appends to the buffer. */
+}
+
+static const rio rioCBufferIO = {
+    rioCBufferRead,
+    rioCBufferWrite,
+    rioCBufferTell,
+    rioCBufferFlush,
+    NULL,           /* update_checksum */
+    0,              /* current checksum */
+    0,              /* flags */
+    0,              /* bytes read or written */
+    0,              /* read/write chunk size */
+    { { NULL, 0 } } /* union for io-specific vars */
+};
+
+void rioInitWithCBuffer(rio *r, char *ptr, size_t len) {
+    *r = rioCBufferIO;
+    r->io.cbuffer.ptr = ptr;
+    r->io.cbuffer.len = len;
+    r->io.cbuffer.pos = 0;
+}
+
 /* --------------------- Stdio file pointer implementation ------------------- */
 
 /* Returns 1 or 0 for success/failure. */

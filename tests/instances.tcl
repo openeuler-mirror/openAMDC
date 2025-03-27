@@ -44,9 +44,9 @@ if {[catch {cd tmp}]} {
 # the provided configuration file. Returns the PID of the process.
 proc exec_instance {type dirname cfgfile} {
     if {$type eq "redis"} {
-        set prgname openamdc-server
+        set prgname "openamdc-server"
     } elseif {$type eq "sentinel"} {
-        set prgname openamdc-sentinel
+        set prgname "openamdc-server --sentinel"
     } else {
         error "Unknown instance type."
     }
