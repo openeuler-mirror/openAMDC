@@ -474,7 +474,7 @@ cuckooFilter cuckooFilterDecodeChunk(const char *buf, size_t len) {
 
     size_t cuckooFilterTableSize = filter.numBuckets * filter.bucketSize * sizeof(CuckooFingerprint);
     for (uint16_t i = 0; i < filter.numFilters; i++) {
-        filter.tables->data = CUCKOO_MALLOC(cuckooFilterTableSize);
+        filter.tables[i].data = CUCKOO_MALLOC(cuckooFilterTableSize);
         size_t offset = sizeof(cuckooFilterHeader) + i * cuckooFilterTableSize;
         cuckooFilterTable *table = filter.tables + i;
         table->bucketSize = filter.bucketSize;
