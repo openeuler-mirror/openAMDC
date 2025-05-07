@@ -244,11 +244,16 @@ void callbackFuntion(void *var, aeAsyncCallback *callback) {
 
 /* Initiates an asynchronous function for a client with optional locking behavior */
 int clientAsyncFuntion(client *c, aeAsyncCallback *callback, int lock) {
-    /* Increment the count of asynchronous operations for the client */
+    int depth;
+    /* Releases the client lock to allow other threads to proceed. */
+    MUTEX_UNLOCK(&c->lock, depth);
+    /* Increment the count of asynchronous operations for the client. */
     c->async_ops++;
-
-    /* Invoke the asynchronous function handler from the event loop */
-    return aeAsyncFunction(server.el[c->iel], callbackFuntion, c, callback, lock);
+    /* Invoke the asynchronous function handler from the event loop. */
+    int result = aeAsyncFunction(server.el[c->iel], callbackFuntion, c, callback, lock);
+    /* Reacquires the client lock to ensure thread safety. */
+    MUTEX_RELOCK(&c->lock, depth);
+    return result;
 }
 
 /* This function processes a client's command buffer, interpreting Redis protocol commands,

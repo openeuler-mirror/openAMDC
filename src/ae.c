@@ -68,25 +68,31 @@ static void aeAsyncTaskProcess(aeEventLoop *eventLoop, int fd, void *clientData,
  * called from the event loop thread, or sends a command to the event loop thread
  * for execution. It's designed to facilitate non-blocking operations. */
 int aeAsyncFunction(aeEventLoop *eventLoop, aeAsyncProc *proc, void *var, aeAsyncCallback *callback, int lock) {
+    /* If the event loop is running in the current thread. */
     if (eventLoop == eventLoopThread) {
         proc(var, callback);
         return AE_OK;
     }
 
+    /* Define task structure. */
     struct aeAsyncTask task;
     task.proc = proc;
     task.lock = lock;
     task.var = var;
     task.callback = callback;
 
+    /* Releases the global lock to allow other threads to proceed. */
+    int depth;
+    MUTEX_UNLOCK(&globalLock, depth);
+    /* Writes the task to the event loop thread's pipe. */
     ssize_t size = write(eventLoop->fdAsyncWrite, &task, sizeof(task));
     if (!eventLoop->stop) {
         if (!(!size || size == sizeof(task))) {
             printf("aeAsyncFunction error: %s\n", strerror(errno));
         }
-        assert(!size || size == sizeof(task));
     }
-
+    /* Reacquires the global lock to ensure thread safety. */
+    MUTEX_RELOCK(&globalLock, depth);
     return size > 0 ? AE_OK : AE_ERR;
 }
 

@@ -246,7 +246,7 @@ void sendTrackingMessage(client *c, char *keyname, size_t keylen, int proto) {
     uint64_t old_flags = c->flags;
     c->flags |= CLIENT_PUSHING;
 
-    int using_redirection = 0;
+    int using_redirection = 0, depth;
     if (c->client_tracking_redirection) {
         client *redir = lookupClientByID(c->client_tracking_redirection);
         if (!redir) {
@@ -263,9 +263,9 @@ void sendTrackingMessage(client *c, char *keyname, size_t keylen, int proto) {
             return;
         }
         if (!(old_flags & CLIENT_PUSHING)) c->flags &= ~CLIENT_PUSHING;
-        wrapperMutexUnlock(&cl);
+        WRAPPER_MUTEX_UNLOCK(&cl, depth);
         cl.lock = &redir->lock;
-        wrapperMutexLock(&cl);
+        WRAPPER_MUTEX_RELOCK(&cl, depth);
         c = redir;
         using_redirection = 1;
         old_flags = c->flags;

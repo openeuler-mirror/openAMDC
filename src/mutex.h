@@ -17,7 +17,18 @@
 #include <errno.h>
 #include <pthread.h>
 
-typedef int (mutexSkipLock)();
+typedef int (mutexSkipLock)(void);
+
+#define MUTEX_UNLOCK(m, depth) \
+do { \
+    (depth) = (m)->depth; \
+    for (int i = 0; i < (depth); i++) mutexUnlock(m); \
+} while (0)
+
+#define MUTEX_RELOCK(m, depth) \
+do { \
+    for (int i = 0; i < (depth); i++) mutexLock(m); \
+} while (0)
 
 struct mutex {
     char *name;
@@ -54,6 +65,17 @@ struct wrapperMutex {
 
 #define WRAPPER_MUTEX_NOCLEANUP_DEFINE(v, l) \
     struct wrapperMutex (v) = {.lock = (l), .depth = 1};
+
+#define WRAPPER_MUTEX_UNLOCK(m, depth) \
+do { \
+    (depth) = (m)->depth; \
+    for (int i = 0; i < (depth); i++) wrapperMutexUnlock(m); \
+} while (0)
+
+#define WRAPPER_MUTEX_RELOCK(m, depth) \
+do { \
+    for (int i = 0; i < (depth); i++) wrapperMutexLock(m); \
+} while (0)
 
 int wrapperMutexLock(struct wrapperMutex *wm);
 int wrapperMutexTryLock(struct wrapperMutex *wm);

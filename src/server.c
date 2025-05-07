@@ -2041,14 +2041,14 @@ void cronUpdateMemoryStats() {
 
 /* Asynchronously handles clients that have pending write operations */
 void asyncHandleClientsWithPendingWrites(void *var) {
+    int depth;
     client *c = var;
     /* Install a write handler for the client to manage future write events */
     clientInstallWriteHandler(c);
     /* Process the pending write tasks for the current thread */
-    WRAPPER_MUTEX_NOCLEANUP_DEFINE(cl, &c->lock);
-    wrapperMutexUnlock(&cl);
+    MUTEX_UNLOCK(&c->lock, depth);
     handleClientsWithPendingWrites(c->iel);
-    wrapperMutexLock(&cl);
+    MUTEX_RELOCK(&c->lock, depth);
 }
 
 /*
@@ -2477,7 +2477,8 @@ extern int ProcessingEventsWhileBlocked;
  * call some other low-risk functions. */
 void beforeSleep(struct aeEventLoop *eventLoop) {
     UNUSED(eventLoop);
-    
+    int depth;
+
     tlsProcessPendingData(); 
 
     WRAPPER_MUTEX_LOCK(gl, &globalLock);
@@ -2566,9 +2567,9 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
         flushAppendOnlyFile(0);
 
     /* Handle writes with pending output buffers. */
-    wrapperMutexUnlock(&gl);
+    WRAPPER_MUTEX_UNLOCK(&gl, depth);
     handleClientsWithPendingWrites(threadId);
-    wrapperMutexLock(&gl);
+    WRAPPER_MUTEX_RELOCK(&gl, depth);
 
     /* Close clients that need to be closed asynchronous */
     freeClientsInAsyncFreeQueue(threadId);
