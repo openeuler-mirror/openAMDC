@@ -245,10 +245,10 @@ void callbackFuntion(void *var, aeAsyncCallback *callback) {
 /* Initiates an asynchronous function for a client with optional locking behavior */
 int clientAsyncFuntion(client *c, aeAsyncCallback *callback, int lock) {
     int depth;
-    /* Releases the client lock to allow other threads to proceed. */
-    MUTEX_UNLOCK(&c->lock, depth);
     /* Increment the count of asynchronous operations for the client. */
     c->async_ops++;
+    /* Releases the client lock to allow other threads to proceed. */
+    MUTEX_UNLOCK(&c->lock, depth);
     /* Invoke the asynchronous function handler from the event loop. */
     int result = aeAsyncFunction(server.el[c->iel], callbackFuntion, c, callback, lock);
     /* Reacquires the client lock to ensure thread safety. */
