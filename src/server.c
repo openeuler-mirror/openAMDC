@@ -3918,10 +3918,6 @@ void call(client *c, int flags) {
     struct redisCommand *real_cmd = c->cmd;
     static long long prev_err_count[MAX_THREADS];
 
-    if (c->cmd->flags & CMD_CATEGORY_REPLICATION) {
-        processAsyncWriteTasks();
-    }
-
     /* Initialization: clear the flags that must be set by the command on
      * demand, and initialize the array for additional commands propagation. */
     c->flags &= ~(CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);
