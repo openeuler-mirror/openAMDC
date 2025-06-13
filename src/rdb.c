@@ -2714,6 +2714,7 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
                     robj *keyobj = createStringObject(key, sdslen(key));
                     /* Create a swap data entry for swapping out the object. */
                     swapDataEntry *entry = swapDataEntryCreate(SWAP_OUT, db->id, keyobj, val, expiretime, version);
+                    if (entry == NULL) goto eoferr;
                     /* Submit the swap data entry to the swap. */
                     swapDataEntrySubmit(entry, -1, 1);
                     /* Decrement the reference count of the key. */

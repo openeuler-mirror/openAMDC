@@ -21,8 +21,10 @@ typedef int (mutexSkipLock)(void);
 
 #define MUTEX_UNLOCK(m, depth) \
 do { \
-    (depth) = (m)->depth; \
-    for (int i = 0; i < (depth); i++) mutexUnlock(m); \
+    if (mutexOwnLock(m)) { \
+        (depth) = (m)->depth; \
+        for (int i = 0; i < (depth); i++) mutexUnlock(m); \
+    } else { (depth) = 0; } \
 } while (0)
 
 #define MUTEX_RELOCK(m, depth) \

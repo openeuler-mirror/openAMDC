@@ -61,7 +61,7 @@ typedef struct swapDataEntry {
     int intention;
     int dbid;
     robj *key;
-    robj *val;
+    sds enc;
     long long expiretime;
     uint64_t version;
 } swapDataEntry;

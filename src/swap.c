@@ -17,7 +17,7 @@
 #define KB 1024
 #define MB (1024 * 1024)
 
-static sds swapDataEncodeObject(swapDataEntry *entry);
+static sds swapDataEncodeObject(int dbid, robj *key, robj *val, long long expiretime, uint64_t version);
 static void swapDataEntryBatchFinished(swapDataEntryBatch *eb, int async);
 
 /* Initializes the RocksDB database. */
@@ -159,12 +159,16 @@ swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, robj *val
     req->intention = intention;
     req->dbid = dbid;
     req->key = key;
-    req->val = val;
     req->expiretime = expiretime;
     req->version = version;
     incrRefCount(key);
-    if (val)
-        incrRefCount(val);
+
+    if (intention == SWAP_OUT &&
+        (req->enc = swapDataEncodeObject(dbid, key, val, expiretime, version)) == NULL) {
+        serverLog(LL_WARNING, "Swap data encode object failed, key:%s", (sds)key->ptr);
+        return NULL;
+    }
+
     return req;
 }
 
@@ -172,8 +176,8 @@ swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, robj *val
 void swapDataEntryRelease(swapDataEntry *entry) {
     if (entry == NULL) return;
     decrRefCount(entry->key);
-    if (entry->val)
-        decrRefCount(entry->val);
+    if (entry->enc)
+        sdsfree(entry->enc);
     zfree(entry);
 }
 
@@ -221,7 +225,7 @@ static int swapMoveKeyOutOfMemory(swapDataEntry *entry, int async) {
         /* Get the version of the value in the database and the entry's value. */
         val = dictGetVal(de);
         cur_version = getVersion(val);
-        old_version = getVersion(entry->val);
+        old_version = entry->version;
         /* If the database value's version is newer than the entry's value, return 0 
          * (indicating no action needed as the database has a more recent version). */
         if (cur_version > old_version) {
@@ -244,7 +248,7 @@ static int swapMoveKeyOutOfMemory(swapDataEntry *entry, int async) {
 }
 
 /* Encodes an object into a buffer for storage. */
-static sds swapDataEncodeObject(swapDataEntry *entry) {
+static sds swapDataEncodeObject(int dbid, robj *key, robj *val, long long expiretime, uint64_t version) {
     uint8_t b[1];
     rio payload;
     int rdb_compression = server.rdb_compression;
@@ -257,26 +261,26 @@ static sds swapDataEncodeObject(swapDataEntry *entry) {
 
     /* Save obj version */
     if (rdbSaveType(&payload, RDB_OPCODE_VERSION) == -1) goto werr;
-    if (rdbSaveLen(&payload, entry->version) == -1) goto werr;
+    if (rdbSaveLen(&payload, version) == -1) goto werr;
 
     /* Save the DB number */
     if (rdbSaveType(&payload, RDB_OPCODE_SELECTDB) == -1) goto werr;
-    if (rdbSaveLen(&payload, entry->dbid) == -1) goto werr;
+    if (rdbSaveLen(&payload, dbid) == -1) goto werr;
 
     /* Save the expire time */
-    if (entry->expiretime != -1) {
+    if (expiretime != -1) {
         if (rdbSaveType(&payload,RDB_OPCODE_EXPIRETIME_MS) == -1) goto werr;
-        if (rdbSaveMillisecondTime(&payload,entry->expiretime) == -1) goto werr;
+        if (rdbSaveMillisecondTime(&payload,expiretime) == -1) goto werr;
     }
 
     /* Save the LFU info. */
-    b[0] = LFUDecrAndReturn(entry->val);
+    b[0] = LFUDecrAndReturn(val);
     if (rdbSaveType(&payload, RDB_OPCODE_FREQ) == -1) goto werr;
     if (rioWrite(&payload, b,1) == 0) goto werr;
 
     /* Save type, value */
-    if (rdbSaveObjectType(&payload, entry->val) == -1) goto werr;
-    if (rdbSaveObject(&payload, entry->val, entry->key) == -1) goto werr;
+    if (rdbSaveObjectType(&payload, val) == -1) goto werr;
+    if (rdbSaveObject(&payload, val, key) == -1) goto werr;
 
     /* Save EOF */
     if (rdbSaveType(&payload, RDB_OPCODE_EOF) == -1) goto werr;
@@ -440,7 +444,6 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
     /* Return immediately if there are no entries in the batch. */
     if (eb->count == 0) return C_OK;
 
-    sds buf = NULL;
     char *err = NULL;
     mstime_t swap_latency;
     cuckooFilter filter;
@@ -472,20 +475,13 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
         }
         /* Handle entries with intention to swap out. */
         if (entry->intention == SWAP_OUT) {
-            /* Encode the object associated with the entry. */
-            if ((buf = swapDataEncodeObject(entry)) == NULL) {
-                serverLog(LL_WARNING, "Swap data encode object failed, key:%s", (sds)entry->key->ptr);
-                goto cleanup;
-            }
             /* Write the encoded object to the rocksdb batch. */
             rocksdb_writebatch_put_cf(batch,
                                       server.swap->rocks->cf_handles[DB_CF(entry->dbid)],
                                       entry->key->ptr,
                                       sdslen(entry->key->ptr),
-                                      buf,
-                                      sdslen(buf));
-            /* Free the encoded buffer. */
-            sdsfree(buf);
+                                      entry->enc,
+                                      sdslen(entry->enc));
             /* Increment the total count of swap out keys in the swap statistics. */
             server.db[entry->dbid].stat_swap_out_keys_total++;
         /* Handle entries with intention to delete. */
@@ -524,7 +520,6 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
     return C_OK;
 
 cleanup:
-    if (buf != NULL) sdsfree(buf);
     if (eb->count > 1) cuckooFilterFree(&filter);
     rocksdb_writebatch_destroy(batch);
     return C_ERR;
@@ -989,7 +984,7 @@ static void swapData(int intention, robj *key, robj *val, int dbid) {
         swapDataEntry *entry = swapDataEntryCreate(intention, dbid, key, val, expire, version);
         /* Add the created swap data entry to the tail of
          * the pending requests list for the current thread. */
-        listAddNodeTail(server.swap->pending_entries[threadId], entry);
+        if (entry) listAddNodeTail(server.swap->pending_entries[threadId], entry);
     }
 }
 
@@ -1534,7 +1529,6 @@ cleanup:
 int swapHotmemorySave(void) {
     if (!server.swap_enabled) return C_ERR;
     
-    sds buf = NULL;
     size_t len, seed_size;
     char *cf_buf = NULL;
     char *err = NULL;
@@ -1565,21 +1559,18 @@ int swapHotmemorySave(void) {
             version = getVersion(o);
             expire = getExpire(db,key);
             entry = swapDataEntryCreate(SWAP_OUT, i, key, o, expire, version);
-            
-            /* Encodes an object into a buffer for storage. */
-            if ((buf = swapDataEncodeObject(entry)) == NULL) {
-                serverLog(LL_WARNING, "Swap data encode object failed, key:%s", (sds)entry->key->ptr);
+            if (entry == NULL) {
+                serverLog(LL_WARNING, "Failed to encode object, key: %s", keystr);
                 goto cleanup;
             }
-
             /* Add the encoded object to the RocksDB. */
             rocksdb_put_cf(server.swap->rocks->db,
                            server.swap->rocks->wopts,
                            server.swap->rocks->cf_handles[DB_CF(entry->dbid)],
                            entry->key->ptr,
                            sdslen(entry->key->ptr),
-                           buf,
-                           sdslen(buf),
+                           entry->enc,
+                           sdslen(entry->enc),
                            &err);
             if (err != NULL) {
                 serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
@@ -1590,8 +1581,7 @@ int swapHotmemorySave(void) {
             cuckooFilterInsert(&server.swap->cold_filter[entry->dbid], entry->key->ptr, sdslen(entry->key->ptr));
             server.db[entry->dbid].cold_data_size++;
 
-            /* Free the encoded buffer. */
-            sdsfree(buf); buf = NULL;
+            /* Free the entry. */
             swapDataEntryRelease(entry); entry = NULL;
         }
         dictReleaseIterator(di); di = NULL;
@@ -1716,7 +1706,6 @@ cleanup:
     if (di) dictReleaseIterator(di);
     if (entry) swapDataEntryRelease(entry);
     if (dbnum) sdsfree(dbnum);
-    if (buf) sdsfree(buf);
     if (cf_buf) zfree(cf_buf);
     if (name) sdsfree(name);
     if (cold_data_size) sdsfree(cold_data_size);
@@ -1875,6 +1864,11 @@ int performSwapData(void) {
             }
             version = getVersion(bestval);
             entry = swapDataEntryCreate(SWAP_OUT, bestdbid, keyobj, bestval, expire, version);
+            if (entry == NULL) {
+                serverLog(LL_NOTICE, "Failed to swap key %s", bestkey);
+                decrRefCount(keyobj);
+                continue;
+            }
             swapDataEntrySubmit(entry, -1, 1);
             latencyEndMonitor(swap_latency);
             latencyAddSampleIfNeeded("hotmemory-trigger-swap-out", swap_latency);
@@ -2213,9 +2207,13 @@ void swapCommand(client *c) {
             uint64_t version = getVersion(o);
             long long expire = getExpire(c->db, c->argv[2]);
             swapDataEntry *entry = swapDataEntryCreate(SWAP_OUT, c->db->id, c->argv[2], o, expire, version);
-            /* Submit the swap data entry to the swap */
-            swapDataEntrySubmit(entry, -1, 1);
-            addReply(c, shared.ok);
+            if (entry) {
+                /* Submit the swap data entry to the swap */
+                swapDataEntrySubmit(entry, -1, 1);
+                addReply(c, shared.ok);
+            } else {
+                addReplyError(c, "Failed to swap key");
+            }
         }
     } else {
         addReplySubcommandSyntaxError(c);
