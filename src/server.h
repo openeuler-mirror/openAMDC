@@ -723,7 +723,6 @@ typedef struct redisDb {
     long long avg_ttl;                           /* Average TTL, just for stats */
     unsigned long expires_cursor;                /* Cursor of the active expire cycle. */
     list *defrag_later;                          /* List of key names to attempt to defrag one by one, gradually. */
-    size_t cold_data_size;                       /* Cold data size (keys not in memory) */
     size_t stat_total_lookup_count;              /* Total request num */
     size_t stat_hit_ram_count;                   /* Requests processed directly from RAM */
     long long stat_swap_in_keys_total;           /* Total number of keys swapped in */

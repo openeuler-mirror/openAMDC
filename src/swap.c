@@ -159,6 +159,7 @@ swapDataEntry *swapDataEntryCreate(int intention, int dbid, robj *key, robj *val
     req->intention = intention;
     req->dbid = dbid;
     req->key = key;
+    req->enc = NULL;
     req->expiretime = expiretime;
     req->version = version;
     incrRefCount(key);
@@ -232,9 +233,6 @@ static int swapMoveKeyOutOfMemory(swapDataEntry *entry, int async) {
             return 0;
         }
     }
-
-    /* Increment the cold data size in the database. */
-    server.db[entry->dbid].cold_data_size++;
 
     /* Attempt to unlink the key from the main dictionary. */
     dictEntry *de = dictUnlink(server.db[entry->dbid].dict, entry->key->ptr);
@@ -498,7 +496,7 @@ int swapDataEntryBatchProcess(swapDataEntryBatch *eb) {
         }
         /* Insert the key into the filter if it's a batch operation. */
         if (eb->count > 1) {
-            cuckooFilterInsert(&filter, entry->key->ptr, sdslen(entry->key->ptr));
+            cuckooFilterInsertUnique(&filter, entry->key->ptr, sdslen(entry->key->ptr));
         }
     }
 
@@ -533,9 +531,9 @@ static void swapDataEntryBatchFinished(swapDataEntryBatch *eb, int async) {
         /* Check if the entry's intention is SWAP_OUT. */
         if (entry->intention == SWAP_OUT) {
             /* Insert the key into the cold filter. */
-            if (cuckooFilterInsert(&server.swap->cold_filter[entry->dbid],
-                                   entry->key->ptr, 
-                                   sdslen(entry->key->ptr)) != CUCKOO_FILTER_INSERTED) {
+            if (cuckooFilterInsertUnique(&server.swap->cold_filter[entry->dbid],
+                                         entry->key->ptr, 
+                                         sdslen(entry->key->ptr)) < 0) {
                 serverLog(LL_WARNING, "Cuckoo filter insert failed, key:%s", (sds)entry->key->ptr);
             }
             /* Move the key out of memory according to the swap-out policy. */
@@ -935,7 +933,6 @@ robj *swapIn(robj *key, int dbid) {
         removeExpire(server.db+dbid, key);
         /* Remove the key from the cold filter. */
         cuckooFilterDelete(&server.swap->cold_filter[dbid], key->ptr, sdslen(key->ptr));
-        server.db[dbid].cold_data_size--;
         server.db[dbid].stat_swap_in_expired_keys_skipped++;
         zlibc_free(val);
         return NULL;
@@ -1149,7 +1146,7 @@ int swapHotMemoryLoad(void) {
     int dbid, dist = 0, db = 0;
     rocksdb_iterator_t *iter;
     rocksdb_iterator_t **iterators = NULL;
-    long long dbnum, cold_data_size, swap_data_version = 0, keys_loaded = 0;
+    long long dbnum, swap_data_version = 0, keys_loaded = 0;
     long long delta, mem_toload, mem_loaded = 0;
     size_t mem_reported, mem_used;
 
@@ -1230,28 +1227,6 @@ int swapHotMemoryLoad(void) {
                     sdsfreesplitres(argv, count);
                     goto cleanup;
                 }
-            } else if (strstr(key_buf, "cold_data_size")) {
-                /* Load the cold data size from RocksDB for each database. */
-                int count;
-                long long db;
-                sds *argv = sdssplitlen(key_buf, klen, "#", 1, &count);
-                if (argv && count == 2) {
-                    if (string2ll(argv[1], sdslen(argv[1]), &db) == 0) {
-                        sdsfreesplitres(argv, count);
-                        goto cleanup;
-                    }
-                    if (string2ll(val_buf, vlen, &cold_data_size) == 0) {
-                        sdsfreesplitres(argv, count);
-                        goto cleanup;
-                    }
-                    /* Set the cold data size. */
-                    server.db[db].cold_data_size = cold_data_size;
-                    sdsfreesplitres(argv, count);
-                } else {
-                    serverLog(LL_WARNING, "Failed to decode cuckoo filter");
-                    sdsfreesplitres(argv, count);
-                    goto cleanup;
-                }
             } else if (!strncmp(key_buf, "status", 6)) {
                 /* skip */
             } else {
@@ -1270,7 +1245,6 @@ int swapHotMemoryLoad(void) {
         /* Clear the cuckoo filter and cold data size for each database. */
         for (int i = 0; i < server.dbnum; i++) {
             cuckooFilterClear(&server.swap->cold_filter[i]);
-            server.db[i].cold_data_size = 0;
         }
 
         /* Get the list column families of the RocksDB instance. */
@@ -1321,9 +1295,10 @@ int swapHotMemoryLoad(void) {
                 /* Set the swap data version. */
                 if (version > (uint64_t)swap_data_version) swap_data_version = version;
                 /* Insert the key into the cuckoo filter. */
-                cuckooFilterInsert(&server.swap->cold_filter[i], key_buf, klen);
-                /* Increment cold data size. */
-                server.db[i].cold_data_size++;
+                if (cuckooFilterInsertUnique(&server.swap->cold_filter[i], key_buf, klen) < 0) {
+                    serverLog(LL_WARNING, "Failed to insert key into cold filter");
+                    goto cleanup;
+                }
                 /* Move the iterator to the next key. */
                 rocksdb_iter_next(iter);
             }
@@ -1401,7 +1376,7 @@ int swapHotMemoryLoad(void) {
             removeExpire(server.db+dbid, &keyobj);
             /* Delete the key from the cold filter. */
             cuckooFilterDelete(&server.swap->cold_filter[dbid], key, sdslen(key));
-            server.db[dbid].cold_data_size--;
+            /* Increment the number of expired keys. */
             server.db[dbid].stat_swap_in_expired_keys_skipped++;
         } else {
             /* Add the new object in the hash table. */
@@ -1424,9 +1399,6 @@ int swapHotMemoryLoad(void) {
 
             /* Delete the key from the cuckoo filter. */
             cuckooFilterDelete(&server.swap->cold_filter[dbid], key, sdslen(key));
-
-            /* Decrement the cold data size. */
-            server.db[dbid].cold_data_size--;
         }
 
         /* Calculate the memory used by the loaded object. */
@@ -1578,8 +1550,12 @@ int swapHotmemorySave(void) {
             }
 
             /* Inserts the key into the Cuckoo filter. */
-            cuckooFilterInsert(&server.swap->cold_filter[entry->dbid], entry->key->ptr, sdslen(entry->key->ptr));
-            server.db[entry->dbid].cold_data_size++;
+            if (cuckooFilterInsertUnique(&server.swap->cold_filter[entry->dbid],
+                                         entry->key->ptr,
+                                         sdslen(entry->key->ptr)) < 0) {
+                serverLog(LL_WARNING, "Cuckoo filter insert failed");
+                goto cleanup;
+            };
 
             /* Free the entry. */
             swapDataEntryRelease(entry); entry = NULL;
@@ -1608,26 +1584,7 @@ int swapHotmemorySave(void) {
     /* Iterate over each database. */
     for (int i = 0; i < server.dbnum; i++) {
         redisDb *db = server.db+i;
-        if (db->cold_data_size == 0) continue;
-
-        /* Save the cold data size to RocksDB. */
-        name = sdsnew("cold_data_size");
-        name = sdscatprintf(name, "#%d", i);
-        cold_data_size = sdsfromlonglong(db->cold_data_size);
-        rocksdb_put_cf(server.swap->rocks->db,
-                       server.swap->rocks->wopts,
-                       server.swap->rocks->cf_handles[META_CF],
-                       name,
-                       sdslen(name),
-                       cold_data_size,
-                       sdslen(cold_data_size),
-                       &err);
-        if (err != NULL) {
-            serverLog(LL_WARNING, "Rocksdb write failed, err:%s", err);
-            goto cleanup;
-        }
-        sdsfree(name); name = NULL;
-        sdsfree(cold_data_size); cold_data_size = NULL;
+        if (coldDataSize(db->id) == 0) continue;
 
         /* Save the cuckoo filter to RocksDB. */
         name = sdsnew("cuckoo_filter");
@@ -2170,6 +2127,12 @@ void swapProcessPendingEntries(int iel) {
         /* Submit the swap data entry to the swap system. */
         swapDataEntrySubmit(e, -1, 0);
     }
+}
+
+/* Return the number of cold data in the given database. */
+uint64_t coldDataSize(int dbid) {
+    if (!server.swap_enabled) return 0;
+    return cuckooFilterSize(&server.swap->cold_filter[dbid]);
 }
 
 /* Swap command. */

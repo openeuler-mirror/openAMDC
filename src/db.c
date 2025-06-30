@@ -74,7 +74,6 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
 
             /* Remove the key from the cold filter. */
             cuckooFilterDelete(&server.swap->cold_filter[db->id], key->ptr, sdslen(key->ptr));
-            db->cold_data_size--;
 
             /* Update the access time for the ageing algorithm.
              * Don't do it if we have a saving child, as this will trigger
@@ -298,8 +297,8 @@ robj *dbRandomKey(redisDb *db) {
         sds key;
         robj *keyobj = NULL;
 
-        if (server.swap_enabled && db->cold_data_size) {
-            size_t totalsize = dictSize(db->dict) + db->cold_data_size;
+        if (server.swap_enabled && coldDataSize(db->id)) {
+            size_t totalsize = dictSize(db->dict) + coldDataSize(db->id);
             size_t random = rand() % totalsize;
             if (random >= dictSize(db->dict)) {
                 char *key_buf;
@@ -308,18 +307,18 @@ robj *dbRandomKey(redisDb *db) {
                     rocksdb_create_iterator_cf(server.swap->rocks->db,
                                                server.swap->rocks->ropts,
                                                server.swap->rocks->cf_handles[DB_CF(db->id)]);
-                random = rand() % db->cold_data_size;
-                if (random < db->cold_data_size / 2) {
+                random = rand() % coldDataSize(db->id);
+                if (random < coldDataSize(db->id) / 2) {
                     rocksdb_iter_seek_to_first(iter);
                     step = 0;
                 }
                 else {
                     rocksdb_iter_seek_to_last(iter);
-                    step = db->cold_data_size - 1;
+                    step = coldDataSize(db->id) - 1;
                 }
                 while (rocksdb_iter_valid(iter)) {
                     if (step == random) break;
-                    if (random < db->cold_data_size / 2) {
+                    if (random < coldDataSize(db->id) / 2) {
                         rocksdb_iter_next(iter);
                         step++;
                     }
@@ -452,7 +451,7 @@ long long emptyDbStructure(redisDb *dbarray, int dbnum, int async,
             dictEmpty(dbarray[j].expires,callback);
         }
 
-        if (server.swap_enabled && dbarray[j].cold_data_size) {
+        if (server.swap_enabled && coldDataSize(dbarray[j].id)) {
             sds name;
             char *err = NULL;
             rocksdb_drop_column_family(server.swap->rocks->db, server.swap->rocks->cf_handles[DB_CF(j)], &err);
@@ -471,10 +470,8 @@ long long emptyDbStructure(redisDb *dbarray, int dbnum, int async,
                 return -1;
             }
             sdsfree(name);
-            removed += dbarray[j].cold_data_size;
-
+            removed += coldDataSize(dbarray[j].id);
             cuckooFilterClear(&server.swap->cold_filter[j]);
-            dbarray[j].cold_data_size = 0;
         }
 
         /* Because all keys of database are removed, reset average ttl. */
@@ -635,7 +632,7 @@ long long dbTotalServerKeyCount() {
     long long total = 0;
     int j;
     for (j = 0; j < server.dbnum; j++) {
-        total += dictSize(server.db[j].dict) + server.db[j].cold_data_size;
+        total += dictSize(server.db[j].dict) + coldDataSize(j);
     }
     return total;
 }
@@ -1049,7 +1046,7 @@ void scanGenericCommand(client *c, robj *o, unsigned long cursor) {
         if (server.swap_enabled &&
             cursor == 0 &&
             c->cold_data_iter_cursor[c->db->id] == 0) {
-            c->cold_data_iter_cursor[c->db->id] = c->db->cold_data_size;
+            c->cold_data_iter_cursor[c->db->id] = coldDataSize(c->db->id);
             cursor = c->cold_data_iter_cursor[c->db->id];
             c->cold_data_iters[c->db->id] =
                 rocksdb_create_iterator_cf(server.swap->rocks->db,
@@ -1186,7 +1183,7 @@ void scanCommand(client *c) {
 }
 
 void dbsizeCommand(client *c) {
-    addReplyLongLong(c,dictSize(c->db->dict)+c->db->cold_data_size);
+    addReplyLongLong(c,dictSize(c->db->dict)+coldDataSize(c->db->id));
 }
 
 void lastsaveCommand(client *c) {

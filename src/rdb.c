@@ -1237,8 +1237,7 @@ int rdbSaveRio(rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
 
     for (j = 0; j < server.dbnum; j++) {
         redisDb *db = server.db+j;
-        size_t expires_size, db_size = dictSize(db->dict);
-        if (server.swap_enabled) db_size += db->cold_data_size;
+        size_t expires_size, db_size = dictSize(db->dict) + coldDataSize(db->id);
         if (db_size == 0) continue;
         expires_size = dictSize(db->expires);
         di = dictGetSafeIterator(db->dict);

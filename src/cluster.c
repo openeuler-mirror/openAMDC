@@ -4088,8 +4088,7 @@ int verifyClusterConfigWithData(void) {
 
     /* Make sure we only have keys in DB0. */
     for (j = 1; j < server.dbnum; j++) {
-        size_t dbsize = dictSize(server.db[j].dict);
-        if (server.swap_enabled) dbsize += server.db[j].cold_data_size;
+        size_t dbsize = dictSize(server.db[j].dict) + coldDataSize(j);
         if (dbsize) return C_ERR;
     }
 
@@ -4540,8 +4539,7 @@ NULL
         clusterReplyMultiBulkSlots(c);
     } else if (!strcasecmp(c->argv[1]->ptr,"flushslots") && c->argc == 2) {
         /* CLUSTER FLUSHSLOTS */
-        size_t dbsize = dictSize(server.db[0].dict);
-        if (server.swap_enabled) dbsize += server.db[0].cold_data_size;
+        size_t dbsize = dictSize(server.db[0].dict) + coldDataSize(0);
         if (dbsize != 0) {
             addReplyError(c,"DB must be empty to perform CLUSTER FLUSHSLOTS.");
             return;
@@ -4879,8 +4877,7 @@ NULL
         /* If the instance is currently a master, it should have no assigned
          * slots nor keys to accept to replicate some other node.
          * Slaves can switch to another master without issues. */
-        dbsize = dictSize(server.db[0].dict);
-        if (server.swap_enabled) dbsize += server.db[0].cold_data_size;
+        dbsize = dictSize(server.db[0].dict) + coldDataSize(0);
         if (nodeIsMaster(myself) &&
             (myself->numslots != 0 || dbsize != 0)) {
             addReplyError(c,
@@ -5043,8 +5040,7 @@ NULL
 
         /* Slaves can be reset while containing data, but not master nodes
          * that must be empty. */
-        dbsize = dictSize(c->db->dict);
-        if (server.swap_enabled) dbsize += c->db->cold_data_size;
+        dbsize = dictSize(c->db->dict) + coldDataSize(c->db->id);
         if (nodeIsMaster(myself) && dbsize != 0) {
             addReplyError(c,"CLUSTER RESET can't be called with "
                             "master nodes containing keys");

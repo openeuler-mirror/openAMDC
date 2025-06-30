@@ -138,5 +138,6 @@ int swapIterateGenerateRDB(rio *rdb, int rdbflags, int dbid, long key_count, siz
 void swapStopGenerateRDB(void);
 int swapIterateGenerateAppendOnlyFile(rio *aof, int dbid, long key_count, size_t processed, long long updated_time);
 void swapProcessPendingEntries(int iel);
+uint64_t coldDataSize(int dbid);
 
 #endif

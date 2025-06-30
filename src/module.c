@@ -39,6 +39,7 @@
 #include "slowlog.h"
 #include "rdb.h"
 #include "monotonic.h"
+#include "swap.h"
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -2462,7 +2463,7 @@ void RM_ResetDataset(int restart_aof, int async) {
 /* Returns the number of keys in the current db. */
 unsigned long long RM_DbSize(RedisModuleCtx *ctx) {
     size_t dbsize = dictSize(ctx->client->db->dict);
-    if (server.swap_enabled) dbsize += ctx->client->db->cold_data_size;
+    if (server.swap_enabled) dbsize += coldDataSize(ctx->client->db->id);
     return dbsize;
 }
 

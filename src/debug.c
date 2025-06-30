@@ -295,7 +295,7 @@ void computeDatasetDigest(unsigned char *final) {
         dictReleaseIterator(di);
 
         if (server.swap_enabled) {
-            if (db->cold_data_size == 0) continue;
+            if (coldDataSize(db->id) == 0) continue;
             /* Create an iterator for the specified column family in the RocksDB database. */
             rocksdb_iterator_t *iter =
                 rocksdb_create_iterator_cf(server.swap->rocks->db,

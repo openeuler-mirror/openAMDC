@@ -47,6 +47,10 @@ uint8_t *GetCuckooFilterHashFunctionSeed(size_t *size) {
     return cuckoo_hash_function_seed;
 }
 
+uint64_t cuckooFilterSize(const cuckooFilter *filter) {
+    return filter->numItems;
+}
+
 int cuckooFilterInit(cuckooFilter *filter, uint64_t levelSize, uint16_t bucketSize,
                       uint16_t maxIterations, uint16_t expansion, int lazy) {
     uint64_t capacity = levelSize / sizeof(CuckooFingerprint);

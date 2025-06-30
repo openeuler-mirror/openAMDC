@@ -2192,7 +2192,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
                 long long hotkeys, coldkeys, allkeys, vkeys;
 
                 hotkeys = dictSize(server.db[j].dict);
-                coldkeys = server.db[j].cold_data_size;
+                coldkeys = coldDataSize(j);
                 allkeys = hotkeys + coldkeys;
                 vkeys = dictSize(server.db[j].expires);
                 if (hotkeys || coldkeys || vkeys) {
@@ -3410,7 +3410,6 @@ void initServer(void) {
         server.db[j].avg_ttl = 0;
         server.db[j].defrag_later = listCreate();
         listSetFreeMethod(server.db[j].defrag_later,(void (*)(void*))sdsfree);
-        server.db[j].cold_data_size = 0;
         server.db[j].stat_total_lookup_count = 0;
         server.db[j].stat_hit_ram_count = 0;
         server.db[j].stat_swap_in_empty_keys_skipped = 0;
@@ -5611,8 +5610,7 @@ sds genRedisInfoString(const char *section) {
         for (j = 0; j < server.dbnum; j++) {
             long long keys, vkeys;
 
-            keys = dictSize(server.db[j].dict);
-            if (server.swap_enabled) keys += server.db[j].cold_data_size;
+            keys = dictSize(server.db[j].dict) + coldDataSize(j);
             vkeys = dictSize(server.db[j].expires);
             if (keys || vkeys) {
                 if (server.swap_enabled) {
@@ -5683,8 +5681,7 @@ sds genRedisInfoString(const char *section) {
             for (j = 0; j < server.dbnum; j++) {
                 long long keys, vkeys;
 
-                keys = dictSize(server.db[j].dict);
-                if (server.swap_enabled) keys += server.db[j].cold_data_size;
+                keys = dictSize(server.db[j].dict) + coldDataSize(j);
                 vkeys = dictSize(server.db[j].expires);
                 if (keys || vkeys) {
                     cuckooFilterStat stat;
