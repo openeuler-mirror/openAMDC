@@ -16,6 +16,7 @@
 #include "db/db_test_util.h"
 #include "db/read_callback.h"
 #include "db/version_edit.h"
+#include "env/fs_readonly.h"
 #include "options/options_helper.h"
 #include "port/port.h"
 #include "port/stack_trace.h"
@@ -36,18 +37,6 @@ namespace ROCKSDB_NAMESPACE {
 class DBTest2 : public DBTestBase {
  public:
   DBTest2() : DBTestBase("db_test2", /*env_do_fsync=*/true) {}
-  std::vector<FileMetaData*> GetLevelFileMetadatas(int level, int cf = 0) {
-    VersionSet* const versions = dbfull()->GetVersionSet();
-    assert(versions);
-    ColumnFamilyData* const cfd =
-        versions->GetColumnFamilySet()->GetColumnFamily(cf);
-    assert(cfd);
-    Version* const current = cfd->current();
-    assert(current);
-    VersionStorageInfo* const storage_info = current->storage_info();
-    assert(storage_info);
-    return storage_info->LevelFiles(level);
-  }
 };
 
 TEST_F(DBTest2, OpenForReadOnly) {
@@ -145,7 +134,6 @@ TEST_F(DBTest2, PartitionedIndexUserToInternalKey) {
     db_->ReleaseSnapshot(s);
   }
 }
-
 
 class PrefixFullBloomWithReverseComparator
     : public DBTestBase,
@@ -1487,8 +1475,7 @@ TEST_P(PresetCompressionDictTest, Flush) {
     // TODO(ajkr): fix the below assertion to work with ZSTD. The expectation on
     // number of bytes needs to be adjusted in case the cached block is in
     // ZSTD's digested dictionary format.
-    if (compression_type_ != kZSTD &&
-        compression_type_ != kZSTDNotFinalCompression) {
+    if (compression_type_ != kZSTD) {
       // Although we limited buffering to `kBlockLen`, there may be up to two
       // blocks of data included in the dictionary since we only check limit
       // after each block is built.
@@ -1565,8 +1552,7 @@ TEST_P(PresetCompressionDictTest, CompactNonBottommost) {
     // TODO(ajkr): fix the below assertion to work with ZSTD. The expectation on
     // number of bytes needs to be adjusted in case the cached block is in
     // ZSTD's digested dictionary format.
-    if (compression_type_ != kZSTD &&
-        compression_type_ != kZSTDNotFinalCompression) {
+    if (compression_type_ != kZSTD) {
       // Although we limited buffering to `kBlockLen`, there may be up to two
       // blocks of data included in the dictionary since we only check limit
       // after each block is built.
@@ -1627,8 +1613,7 @@ TEST_P(PresetCompressionDictTest, CompactBottommost) {
   // TODO(ajkr): fix the below assertion to work with ZSTD. The expectation on
   // number of bytes needs to be adjusted in case the cached block is in ZSTD's
   // digested dictionary format.
-  if (compression_type_ != kZSTD &&
-      compression_type_ != kZSTDNotFinalCompression) {
+  if (compression_type_ != kZSTD) {
     // Although we limited buffering to `kBlockLen`, there may be up to two
     // blocks of data included in the dictionary since we only check limit after
     // each block is built.
@@ -1988,7 +1973,6 @@ TEST_F(DBTest2, CompactionStall) {
   ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->DisableProcessing();
 }
 
-
 TEST_F(DBTest2, FirstSnapshotTest) {
   Options options;
   options.write_buffer_size = 100000;  // Small write buffer
@@ -2115,16 +2099,15 @@ TEST_P(PinL0IndexAndFilterBlocksTest,
   ASSERT_EQ(2, TestGetTickerCount(options, BLOCK_CACHE_ADD));
   ASSERT_EQ(0, TestGetTickerCount(options, BLOCK_CACHE_DATA_MISS));
 
-  std::string value;
   // Miss and hit count should remain the same, they're all pinned.
-  ASSERT_TRUE(db_->KeyMayExist(ReadOptions(), handles_[1], "key", &value));
+  ASSERT_TRUE(db_->KeyMayExist(ReadOptions(), handles_[1], "key", nullptr));
   ASSERT_EQ(1, TestGetTickerCount(options, BLOCK_CACHE_FILTER_MISS));
   ASSERT_EQ(0, TestGetTickerCount(options, BLOCK_CACHE_FILTER_HIT));
   ASSERT_EQ(1, TestGetTickerCount(options, BLOCK_CACHE_INDEX_MISS));
   ASSERT_EQ(0, TestGetTickerCount(options, BLOCK_CACHE_INDEX_HIT));
 
   // Miss and hit count should remain the same, they're all pinned.
-  value = Get(1, "key");
+  std::string value = Get(1, "key");
   ASSERT_EQ(1, TestGetTickerCount(options, BLOCK_CACHE_FILTER_MISS));
   ASSERT_EQ(0, TestGetTickerCount(options, BLOCK_CACHE_FILTER_HIT));
   ASSERT_EQ(1, TestGetTickerCount(options, BLOCK_CACHE_INDEX_MISS));
@@ -3612,7 +3595,6 @@ TEST_F(DBTest2, OptimizeForSmallDB) {
   value.Reset();
 }
 
-
 TEST_F(DBTest2, IterRaceFlush1) {
   ASSERT_OK(Put("foo", "v1"));
 
@@ -4116,7 +4098,6 @@ TEST_F(DBTest2, ReadCallbackTest) {
   }
 }
 
-
 TEST_F(DBTest2, LiveFilesOmitObsoleteFiles) {
   // Regression test for race condition where an obsolete file is returned to
   // user as a "live file" but then deleted, all while file deletions are
@@ -4444,7 +4425,7 @@ TEST_F(DBTest2, TraceAndReplay) {
       db2->NewDefaultReplayer(handles, std::move(trace_reader), &replayer));
 
   TraceExecutionResultHandler res_handler;
-  std::function<void(Status, std::unique_ptr<TraceRecordResult> &&)> res_cb =
+  std::function<void(Status, std::unique_ptr<TraceRecordResult>&&)> res_cb =
       [&res_handler](Status exec_s, std::unique_ptr<TraceRecordResult>&& res) {
         ASSERT_TRUE(exec_s.ok() || exec_s.IsNotSupported());
         if (res != nullptr) {
@@ -5175,7 +5156,6 @@ TEST_F(DBTest2, TraceWithFilter) {
   // 4 WRITE + HEADER + FOOTER = 6
   ASSERT_EQ(count, 6);
 }
-
 
 TEST_F(DBTest2, PinnableSliceAndMmapReads) {
   Options options = CurrentOptions();
@@ -7705,7 +7685,6 @@ TEST_F(DBTest2, RecoverEpochNumber) {
   }
 }
 
-
 TEST_F(DBTest2, RenameDirectory) {
   Options options = CurrentOptions();
   DestroyAndReopen(options);
@@ -8018,7 +7997,7 @@ TEST_F(DBTest2, GetLatestSeqAndTsForKey) {
   ASSERT_EQ(0, options.statistics->getTickerCount(GET_HIT_L0));
 }
 
-#if defined(ZSTD_ADVANCED)
+#if defined(ZSTD)
 TEST_F(DBTest2, ZSTDChecksum) {
   // Verify that corruption during decompression is caught.
   Options options = CurrentOptions();
@@ -8072,6 +8051,63 @@ TEST_F(DBTest2, TableCacheMissDuringReadFromBlockCacheTier) {
   ASSERT_TRUE(db_->Get(non_blocking_opts, "foo", &value).IsIncomplete());
 
   ASSERT_EQ(orig_num_file_opens, TestGetTickerCount(options, NO_FILE_OPENS));
+}
+
+TEST_F(DBTest2, GetFileChecksumsFromCurrentManifest_CRC32) {
+  Options opts = CurrentOptions();
+  opts.create_if_missing = true;
+  opts.file_checksum_gen_factory = GetFileChecksumGenCrc32cFactory();
+  opts.level0_file_num_compaction_trigger = 10;
+
+  // Bootstrap the test database.
+  DB* db = nullptr;
+  std::string dbname = test::PerThreadDBPath("file_chksum");
+  ASSERT_OK(DB::Open(opts, dbname, &db));
+
+  WriteOptions wopts;
+  FlushOptions fopts;
+  fopts.wait = true;
+  Random rnd(test::RandomSeed());
+  for (int i = 0; i < 4; i++) {
+    ASSERT_OK(db->Put(wopts, Key(i), rnd.RandomString(100)));
+    ASSERT_OK(db->Flush(fopts));
+  }
+
+  // Obtain rich files metadata for source of truth.
+  std::vector<LiveFileMetaData> live_files;
+  db->GetLiveFilesMetaData(&live_files);
+
+  ASSERT_OK(db->Close());
+  delete db;
+  db = nullptr;
+
+  // Process current MANIFEST file and build internal file checksum mappings.
+  std::unique_ptr<FileChecksumList> checksum_list(NewFileChecksumList());
+  auto read_only_fs =
+      std::make_shared<ReadOnlyFileSystem>(env_->GetFileSystem());
+  ASSERT_OK(experimental::GetFileChecksumsFromCurrentManifest(
+      read_only_fs.get(), dbname, checksum_list.get()));
+
+  ASSERT_TRUE(checksum_list != nullptr);
+
+  // Retrieve files, related checksums and checksum functions.
+  std::vector<uint64_t> file_numbers;
+  std::vector<std::string> checksums;
+  std::vector<std::string> checksum_func_names;
+  ASSERT_OK(checksum_list->GetAllFileChecksums(&file_numbers, &checksums,
+                                               &checksum_func_names));
+
+  // Compare results.
+  ASSERT_EQ(live_files.size(), checksum_list->size());
+  for (size_t i = 0; i < live_files.size(); i++) {
+    std::string stored_checksum;
+    std::string stored_func_name;
+    ASSERT_OK(checksum_list->SearchOneFileChecksum(
+        live_files[i].file_number, &stored_checksum, &stored_func_name));
+
+    ASSERT_EQ(live_files[i].file_checksum, stored_checksum);
+    ASSERT_EQ(live_files[i].file_checksum_func_name, stored_func_name);
+  }
 }
 
 }  // namespace ROCKSDB_NAMESPACE

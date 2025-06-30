@@ -36,6 +36,7 @@
 #include "rocksdb/convenience.h"
 #include "rocksdb/db.h"
 #include "rocksdb/env.h"
+#include "rocksdb/external_table.h"
 #include "rocksdb/file_checksum.h"
 #include "rocksdb/file_system.h"
 #include "rocksdb/filter_policy.h"
@@ -44,6 +45,7 @@
 #include "rocksdb/options.h"
 #include "rocksdb/perf_context.h"
 #include "rocksdb/slice_transform.h"
+#include "rocksdb/sst_file_reader.h"
 #include "rocksdb/statistics.h"
 #include "rocksdb/table_properties.h"
 #include "rocksdb/trace_record.h"
@@ -380,11 +382,11 @@ class TableConstructor : public Constructor {
     const ReadOptions read_options;
     const WriteOptions write_options;
     builder.reset(moptions.table_factory->NewTableBuilder(
-        TableBuilderOptions(ioptions, moptions, read_options, write_options,
-                            internal_comparator,
-                            &internal_tbl_prop_coll_factories,
-                            options.compression, options.compression_opts,
-                            kUnknownColumnFamily, column_family_name, level_),
+        TableBuilderOptions(
+            ioptions, moptions, read_options, write_options,
+            internal_comparator, &internal_tbl_prop_coll_factories,
+            options.compression, options.compression_opts, kUnknownColumnFamily,
+            column_family_name, level_, kUnknownNewestKeyTime),
         file_writer_.get()));
 
     for (const auto& kv : kv_map) {
@@ -534,7 +536,8 @@ class MemTableConstructor : public Constructor {
       const SliceTransform* /*prefix_extractor*/) const override {
     return new KeyConvertingIterator(
         memtable_->NewIterator(ReadOptions(), /*seqno_to_time_mapping=*/nullptr,
-                               &arena_, /*prefix_extractor=*/nullptr),
+                               &arena_, /*prefix_extractor=*/nullptr,
+                               /*for_flush=*/false),
         true);
   }
 
@@ -3252,14 +3255,14 @@ TEST_P(BlockBasedTableTest, BlockCacheLookupSeqScans) {
       FilePrefetchBuffer* prefetch_buffer =
           (static_cast<BlockBasedTableIterator*>(iter.get()))
               ->prefetch_buffer();
-      std::vector<std::pair<uint64_t, size_t>> buffer_info(1);
+      std::vector<std::tuple<uint64_t, size_t, bool>> buffer_info(1);
       prefetch_buffer->TEST_GetBufferOffsetandSize(buffer_info);
 
       bbt->TEST_GetDataBlockHandle(read_options, kv_iter->first, block_handle);
       // It won't prefetch the data of cache hit.
       // One block data.
-      ASSERT_EQ(buffer_info[0].second, 4096);
-      ASSERT_EQ(buffer_info[0].first, block_handle.offset());
+      ASSERT_EQ(std::get<1>(buffer_info[0]), 4096);
+      ASSERT_EQ(std::get<0>(buffer_info[0]), block_handle.offset());
 
       ASSERT_EQ(options.statistics->getAndResetTickerCount(READAHEAD_TRIMMED),
                 1);
@@ -3290,14 +3293,14 @@ TEST_P(BlockBasedTableTest, BlockCacheLookupSeqScans) {
       FilePrefetchBuffer* prefetch_buffer =
           (static_cast<BlockBasedTableIterator*>(iter.get()))
               ->prefetch_buffer();
-      std::vector<std::pair<uint64_t, size_t>> buffer_info(1);
+      std::vector<std::tuple<uint64_t, size_t, bool>> buffer_info(1);
       prefetch_buffer->TEST_GetBufferOffsetandSize(buffer_info);
       bbt->TEST_GetDataBlockHandle(read_options, kv_iter->first, block_handle);
 
       // It won't prefetch the data of cache hit.
       // 3 blocks data.
-      ASSERT_EQ(buffer_info[0].second, 12288);
-      ASSERT_EQ(buffer_info[0].first, block_handle.offset());
+      ASSERT_EQ(std::get<1>(buffer_info[0]), 12288);
+      ASSERT_EQ(std::get<0>(buffer_info[0]), block_handle.offset());
 
       for (; kv_iter != kvmap.end() && iter->Valid(); kv_iter++) {
         ASSERT_EQ(iter->key(), kv_iter->first);
@@ -3313,8 +3316,8 @@ TEST_P(BlockBasedTableTest, BlockCacheLookupSeqScans) {
       // Second Prefetch.
       prefetch_buffer->TEST_GetBufferOffsetandSize(buffer_info);
       bbt->TEST_GetDataBlockHandle(read_options, kv_iter->first, block_handle);
-      ASSERT_EQ(buffer_info[0].second, 20480);
-      ASSERT_EQ(buffer_info[0].first, block_handle.offset());
+      ASSERT_EQ(std::get<1>(buffer_info[0]), 20480);
+      ASSERT_EQ(std::get<0>(buffer_info[0]), block_handle.offset());
 
       ASSERT_EQ(options.statistics->getAndResetTickerCount(READAHEAD_TRIMMED),
                 1);
@@ -3401,13 +3404,13 @@ TEST_P(BlockBasedTableTest, BlockCacheLookupAsyncScansSeek) {
       FilePrefetchBuffer* prefetch_buffer =
           (static_cast<BlockBasedTableIterator*>(iter.get()))
               ->prefetch_buffer();
-      std::vector<std::pair<uint64_t, size_t>> buffer_info(2);
+      std::vector<std::tuple<uint64_t, size_t, bool>> buffer_info(2);
       prefetch_buffer->TEST_GetBufferOffsetandSize(buffer_info);
 
       bbt->TEST_GetDataBlockHandle(read_options, kv_iter->first, block_handle);
-      ASSERT_EQ(buffer_info[0].first, block_handle.offset());
-      ASSERT_EQ(buffer_info[0].second, 4096);
-      ASSERT_EQ(buffer_info[1].second, 0);
+      ASSERT_EQ(std::get<0>(buffer_info[0]), block_handle.offset());
+      ASSERT_EQ(std::get<1>(buffer_info[0]), 4096);
+      ASSERT_EQ(std::get<1>(buffer_info[1]), 0);
 
       ASSERT_EQ(options.statistics->getAndResetTickerCount(READAHEAD_TRIMMED),
                 2);
@@ -3440,21 +3443,21 @@ TEST_P(BlockBasedTableTest, BlockCacheLookupAsyncScansSeek) {
       FilePrefetchBuffer* prefetch_buffer =
           (static_cast<BlockBasedTableIterator*>(iter.get()))
               ->prefetch_buffer();
-      std::vector<std::pair<uint64_t, size_t>> buffer_info(2);
+      std::vector<std::tuple<uint64_t, size_t, bool>> buffer_info(2);
       prefetch_buffer->TEST_GetBufferOffsetandSize(buffer_info);
       {
         // 1st Buffer Verification.
         bbt->TEST_GetDataBlockHandle(read_options, kv_iter->first,
                                      block_handle);
-        ASSERT_EQ(buffer_info[0].first, block_handle.offset());
-        ASSERT_EQ(buffer_info[0].second, 8192);
+        ASSERT_EQ(std::get<0>(buffer_info[0]), block_handle.offset());
+        ASSERT_EQ(std::get<1>(buffer_info[0]), 8192);
 
         // 2nd Buffer Verification.
         InternalKey ikey_tmp("00000360", 0, kTypeValue);
         bbt->TEST_GetDataBlockHandle(read_options, ikey_tmp.Encode().ToString(),
                                      block_handle);
-        ASSERT_EQ(buffer_info[1].first, block_handle.offset());
-        ASSERT_EQ(buffer_info[1].second, 8192);
+        ASSERT_EQ(std::get<0>(buffer_info[1]), block_handle.offset());
+        ASSERT_EQ(std::get<1>(buffer_info[1]), 8192);
 
         ASSERT_EQ(options.statistics->getAndResetTickerCount(READAHEAD_TRIMMED),
                   1);
@@ -3493,21 +3496,21 @@ TEST_P(BlockBasedTableTest, BlockCacheLookupAsyncScansSeek) {
               ->prefetch_buffer();
 
       {
-        std::vector<std::pair<uint64_t, size_t>> buffer_info(2);
+        std::vector<std::tuple<uint64_t, size_t, bool>> buffer_info(2);
         prefetch_buffer->TEST_GetBufferOffsetandSize(buffer_info);
 
         // 1st Buffer Verification.
         bbt->TEST_GetDataBlockHandle(read_options, kv_iter->first,
                                      block_handle);
-        ASSERT_EQ(buffer_info[0].first, block_handle.offset());
-        ASSERT_EQ(buffer_info[0].second, 8192);
+        ASSERT_EQ(std::get<0>(buffer_info[0]), block_handle.offset());
+        ASSERT_EQ(std::get<1>(buffer_info[0]), 8192);
 
         // 2nd Buffer Verification.
         InternalKey ikey_tmp("00000540", 0, kTypeValue);
         bbt->TEST_GetDataBlockHandle(read_options, ikey_tmp.Encode().ToString(),
                                      block_handle);
-        ASSERT_EQ(buffer_info[1].first, block_handle.offset());
-        ASSERT_EQ(buffer_info[1].second, 8192);
+        ASSERT_EQ(std::get<0>(buffer_info[1]), block_handle.offset());
+        ASSERT_EQ(std::get<1>(buffer_info[1]), 8192);
 
         ASSERT_EQ(options.statistics->getAndResetTickerCount(READAHEAD_TRIMMED),
                   1);
@@ -3527,21 +3530,21 @@ TEST_P(BlockBasedTableTest, BlockCacheLookupAsyncScansSeek) {
       }
 
       {
-        std::vector<std::pair<uint64_t, size_t>> buffer_info(2);
+        std::vector<std::tuple<uint64_t, size_t, bool>> buffer_info(2);
         prefetch_buffer->TEST_GetBufferOffsetandSize(buffer_info);
 
         // 1st Buffer Verification.
         bbt->TEST_GetDataBlockHandle(read_options, kv_iter->first,
                                      block_handle);
-        ASSERT_EQ(buffer_info[0].first, block_handle.offset());
-        ASSERT_EQ(buffer_info[0].second, 8192);
+        ASSERT_EQ(std::get<0>(buffer_info[0]), block_handle.offset());
+        ASSERT_EQ(std::get<1>(buffer_info[0]), 8192);
 
         // 2nd Buffer Verification.
         InternalKey ikey_tmp("00000585", 0, kTypeValue);
         bbt->TEST_GetDataBlockHandle(read_options, ikey_tmp.Encode().ToString(),
                                      block_handle);
-        ASSERT_EQ(buffer_info[1].first, block_handle.offset());
-        ASSERT_EQ(buffer_info[1].second, 4096);
+        ASSERT_EQ(std::get<0>(buffer_info[1]), block_handle.offset());
+        ASSERT_EQ(std::get<1>(buffer_info[1]), 4096);
 
         ASSERT_EQ(options.statistics->getAndResetTickerCount(READAHEAD_TRIMMED),
                   1);
@@ -3561,21 +3564,21 @@ TEST_P(BlockBasedTableTest, BlockCacheLookupAsyncScansSeek) {
       }
 
       {
-        std::vector<std::pair<uint64_t, size_t>> buffer_info(2);
+        std::vector<std::tuple<uint64_t, size_t, bool>> buffer_info(2);
         prefetch_buffer->TEST_GetBufferOffsetandSize(buffer_info);
 
         // 1st Buffer Verification.
         bbt->TEST_GetDataBlockHandle(read_options, kv_iter->first,
                                      block_handle);
-        ASSERT_EQ(buffer_info[0].first, block_handle.offset());
-        ASSERT_EQ(buffer_info[0].second, 4096);
+        ASSERT_EQ(std::get<0>(buffer_info[0]), block_handle.offset());
+        ASSERT_EQ(std::get<1>(buffer_info[0]), 4096);
 
         // 2nd Buffer Verification.
         InternalKey ikey_tmp("00000615", 0, kTypeValue);
         bbt->TEST_GetDataBlockHandle(read_options, ikey_tmp.Encode().ToString(),
                                      block_handle);
-        ASSERT_EQ(buffer_info[1].first, block_handle.offset());
-        ASSERT_EQ(buffer_info[1].second, 4096);
+        ASSERT_EQ(std::get<0>(buffer_info[1]), block_handle.offset());
+        ASSERT_EQ(std::get<1>(buffer_info[1]), 4096);
 
         ASSERT_EQ(options.statistics->getAndResetTickerCount(READAHEAD_TRIMMED),
                   1);
@@ -3595,21 +3598,21 @@ TEST_P(BlockBasedTableTest, BlockCacheLookupAsyncScansSeek) {
       }
 
       {
-        std::vector<std::pair<uint64_t, size_t>> buffer_info(2);
+        std::vector<std::tuple<uint64_t, size_t, bool>> buffer_info(2);
         prefetch_buffer->TEST_GetBufferOffsetandSize(buffer_info);
 
         // 1st Buffer Verification.
         bbt->TEST_GetDataBlockHandle(read_options, kv_iter->first,
                                      block_handle);
-        ASSERT_EQ(buffer_info[0].first, block_handle.offset());
-        ASSERT_EQ(buffer_info[0].second, 4096);
+        ASSERT_EQ(std::get<0>(buffer_info[0]), block_handle.offset());
+        ASSERT_EQ(std::get<1>(buffer_info[0]), 4096);
 
         // 2nd Buffer Verification.
         InternalKey ikey_tmp("00000630", 0, kTypeValue);
         bbt->TEST_GetDataBlockHandle(read_options, ikey_tmp.Encode().ToString(),
                                      block_handle);
-        ASSERT_EQ(buffer_info[1].first, block_handle.offset());
-        ASSERT_EQ(buffer_info[1].second, 8192);
+        ASSERT_EQ(std::get<0>(buffer_info[1]), block_handle.offset());
+        ASSERT_EQ(std::get<1>(buffer_info[1]), 8192);
 
         ASSERT_EQ(options.statistics->getAndResetTickerCount(READAHEAD_TRIMMED),
                   0);
@@ -4464,7 +4467,8 @@ TEST_P(BlockBasedTableTest, NoFileChecksum) {
       TableBuilderOptions(ioptions, moptions, read_options, write_options,
                           *comparator, &internal_tbl_prop_coll_factories,
                           options.compression, options.compression_opts,
-                          kUnknownColumnFamily, column_family_name, level),
+                          kUnknownColumnFamily, column_family_name, level,
+                          kUnknownNewestKeyTime),
       f.GetFileWriter()));
   ASSERT_OK(f.ResetTableBuilder(std::move(builder)));
   f.AddKVtoKVMap(1000);
@@ -4502,7 +4506,8 @@ TEST_P(BlockBasedTableTest, Crc32cFileChecksum) {
       TableBuilderOptions(ioptions, moptions, read_options, write_options,
                           *comparator, &internal_tbl_prop_coll_factories,
                           options.compression, options.compression_opts,
-                          kUnknownColumnFamily, column_family_name, level),
+                          kUnknownColumnFamily, column_family_name, level,
+                          kUnknownNewestKeyTime),
       f.GetFileWriter()));
   ASSERT_OK(f.ResetTableBuilder(std::move(builder)));
   f.AddKVtoKVMap(1000);
@@ -4550,7 +4555,8 @@ TEST_F(PlainTableTest, BasicPlainTableProperties) {
       TableBuilderOptions(ioptions, moptions, read_options, write_options, ikc,
                           &internal_tbl_prop_coll_factories, kNoCompression,
                           CompressionOptions(), kUnknownColumnFamily,
-                          column_family_name, unknown_level),
+                          column_family_name, unknown_level,
+                          kUnknownNewestKeyTime),
       file_writer.get()));
 
   for (char c = 'a'; c <= 'z'; ++c) {
@@ -4605,7 +4611,8 @@ TEST_F(PlainTableTest, NoFileChecksum) {
       TableBuilderOptions(ioptions, moptions, read_options, write_options, ikc,
                           &internal_tbl_prop_coll_factories, kNoCompression,
                           CompressionOptions(), kUnknownColumnFamily,
-                          column_family_name, unknown_level),
+                          column_family_name, unknown_level,
+                          kUnknownNewestKeyTime),
       f.GetFileWriter()));
   ASSERT_OK(f.ResetTableBuilder(std::move(builder)));
   f.AddKVtoKVMap(1000);
@@ -4646,7 +4653,8 @@ TEST_F(PlainTableTest, Crc32cFileChecksum) {
       TableBuilderOptions(ioptions, moptions, read_options, write_options, ikc,
                           &internal_tbl_prop_coll_factories, kNoCompression,
                           CompressionOptions(), kUnknownColumnFamily,
-                          column_family_name, unknown_level),
+                          column_family_name, unknown_level,
+                          kUnknownNewestKeyTime),
       f.GetFileWriter()));
   ASSERT_OK(f.ResetTableBuilder(std::move(builder)));
   f.AddKVtoKVMap(1000);
@@ -4724,9 +4732,9 @@ static void DoCompressionTest(CompressionType comp) {
   ASSERT_TRUE(Between(c.ApproximateOffsetOf("abc"), 0, 0));
   ASSERT_TRUE(Between(c.ApproximateOffsetOf("k01"), 0, 0));
   ASSERT_TRUE(Between(c.ApproximateOffsetOf("k02"), 0, 0));
-  ASSERT_TRUE(Between(c.ApproximateOffsetOf("k03"), 2000, 3550));
-  ASSERT_TRUE(Between(c.ApproximateOffsetOf("k04"), 2000, 3550));
-  ASSERT_TRUE(Between(c.ApproximateOffsetOf("xyz"), 4000, 7100));
+  ASSERT_TRUE(Between(c.ApproximateOffsetOf("k03"), 2000, 3555));
+  ASSERT_TRUE(Between(c.ApproximateOffsetOf("k04"), 2000, 3555));
+  ASSERT_TRUE(Between(c.ApproximateOffsetOf("xyz"), 4000, 7110));
   c.ResetTableReader();
 }
 
@@ -4906,7 +4914,8 @@ TEST_F(MemTableTest, Simple) {
     if (i == 0) {
       iter = GetMemTable()->NewIterator(ReadOptions(),
                                         /*seqno_to_time_mapping=*/nullptr,
-                                        &arena, /*prefix_extractor=*/nullptr);
+                                        &arena, /*prefix_extractor=*/nullptr,
+                                        /*for_flush=*/false);
       arena_iter_guard.reset(iter);
     } else {
       iter = GetMemTable()->NewRangeTombstoneIterator(
@@ -5261,7 +5270,7 @@ TEST_P(BlockBasedTableTest, DISABLED_TableWithGlobalSeqno) {
       TableBuilderOptions(ioptions, moptions, read_options, write_options, ikc,
                           &internal_tbl_prop_coll_factories, kNoCompression,
                           CompressionOptions(), kUnknownColumnFamily,
-                          column_family_name, -1),
+                          column_family_name, -1, kUnknownNewestKeyTime),
       file_writer.get()));
 
   for (char c = 'a'; c <= 'z'; ++c) {
@@ -5445,7 +5454,7 @@ TEST_P(BlockBasedTableTest, BlockAlignTest) {
       TableBuilderOptions(ioptions, moptions, read_options, write_options, ikc,
                           &internal_tbl_prop_coll_factories, kNoCompression,
                           CompressionOptions(), kUnknownColumnFamily,
-                          column_family_name, -1),
+                          column_family_name, -1, kUnknownNewestKeyTime),
       file_writer.get()));
 
   for (int i = 1; i <= 10000; ++i) {
@@ -5631,7 +5640,7 @@ TEST_P(BlockBasedTableTest, PropertiesBlockRestartPointTest) {
       TableBuilderOptions(ioptions, moptions, read_options, write_options, ikc,
                           &internal_tbl_prop_coll_factories, kNoCompression,
                           CompressionOptions(), kUnknownColumnFamily,
-                          column_family_name, -1),
+                          column_family_name, -1, kUnknownNewestKeyTime),
       file_writer.get()));
 
   for (int i = 1; i <= 10000; ++i) {
@@ -6240,8 +6249,8 @@ TEST_F(ChargeCompressionDictionaryBuildingBufferTest, Basic) {
             TableBuilderOptions(ioptions, moptions, read_options, write_options,
                                 ikc, &internal_tbl_prop_coll_factories,
                                 kSnappyCompression, options.compression_opts,
-                                kUnknownColumnFamily, "test_cf",
-                                -1 /* level */),
+                                kUnknownColumnFamily, "test_cf", -1 /* level */,
+                                kUnknownNewestKeyTime),
             file_writer.get()));
 
     std::string key1 = "key1";
@@ -6318,7 +6327,7 @@ TEST_F(ChargeCompressionDictionaryBuildingBufferTest,
       TableBuilderOptions(ioptions, moptions, read_options, write_options, ikc,
                           &internal_tbl_prop_coll_factories, kSnappyCompression,
                           options.compression_opts, kUnknownColumnFamily,
-                          "test_cf", -1 /* level */),
+                          "test_cf", -1 /* level */, kUnknownNewestKeyTime),
       file_writer.get()));
 
   std::string key1 = "key1";
@@ -6405,7 +6414,7 @@ TEST_F(ChargeCompressionDictionaryBuildingBufferTest, BasicWithCacheFull) {
       TableBuilderOptions(ioptions, moptions, read_options, write_options, ikc,
                           &internal_tbl_prop_coll_factories, kSnappyCompression,
                           options.compression_opts, kUnknownColumnFamily,
-                          "test_cf", -1 /* level */),
+                          "test_cf", -1 /* level */, kUnknownNewestKeyTime),
       file_writer.get()));
 
   std::string key1 = "key1";
@@ -6515,9 +6524,650 @@ TEST_F(CacheUsageOptionsOverridesTest, SanitizeAndValidateOptions) {
               std::string::npos);
   Destroy(options);
 }
+
+class ExternalTableReaderTest : public DBTestBase {
+ public:
+  ExternalTableReaderTest()
+      : DBTestBase("external_table_reader_test", /*env_do_fsync=*/false) {}
+
+ protected:
+  class DummyExternalTableFile {
+   public:
+    explicit DummyExternalTableFile(const std::string& file_path,
+                                    FSWritableFile* file)
+        : file_path_(file_path), file_(file), file_size_(0) {
+      props_.comparator_name = BytewiseComparator()->Name();
+    }
+
+    Status Serialize(
+        const std::vector<std::pair<std::string, std::string>>& kv_vec) {
+      for (auto& kv : kv_vec) {
+        SerializeOne(kv.first, kv.second);
+        props_.raw_key_size += kv.first.length();
+        props_.raw_value_size += kv.second.length();
+      }
+      props_.num_entries = kv_vec.size();
+      file_size_ = buf_.length();
+      if (file_) {
+        return file_->Append(buf_, IOOptions(), /*dbg=*/nullptr);
+      } else {
+        return WriteStringToFile(Env::Default(), buf_, file_path_);
+      }
+    }
+
+    Status Deserialize(std::map<std::string, std::string>& kv_map) {
+      Status s = ReadFileToString(Env::Default(), file_path_, &buf_);
+      if (!s.ok()) {
+        return s;
+      }
+
+      while (buf_.length() > 0) {
+        std::pair<std::string, std::string> kv;
+        s = DeserializeOne(kv);
+        if (!s.ok()) {
+          break;
+        }
+        size_t key_size = kv.first.length();
+        size_t value_size = kv.second.length();
+        kv_map.emplace(std::move(kv));
+        props_.raw_key_size += key_size;
+        props_.raw_value_size += value_size;
+      }
+      props_.num_entries = kv_map.size();
+      return s;
+    }
+
+    TableProperties GetTableProperties() const { return props_; }
+
+    uint64_t FileSize() const { return file_size_; }
+
+   private:
+    struct ItemHeader {
+      uint32_t key_size;
+      uint32_t value_size;
+    };
+
+    void SerializeOne(const Slice& key, const Slice& value) {
+      ItemHeader hdr;
+      hdr.key_size = static_cast<uint32_t>(key.size());
+      hdr.value_size = static_cast<uint32_t>(value.size());
+      buf_.append(static_cast<char*>(static_cast<void*>(&hdr)), sizeof(hdr));
+      buf_.append(key.data(), key.size());
+      buf_.append(value.data(), value.size());
+    }
+
+    Status DeserializeOne(std::pair<std::string, std::string>& kv) {
+      ItemHeader hdr;
+      size_t copied =
+          buf_.copy(static_cast<char*>(static_cast<void*>(&hdr)), sizeof(hdr));
+      if (copied < sizeof(hdr)) {
+        return Status::Corruption();
+      }
+      buf_.erase(0, sizeof(hdr));
+      if (buf_.length() < hdr.key_size + hdr.value_size) {
+        return Status::Corruption();
+      }
+      kv.first.assign(std::string_view(buf_.data(), hdr.key_size));
+      buf_.erase(0, hdr.key_size);
+      kv.second.assign(std::string_view(buf_.data(), hdr.value_size));
+      buf_.erase(0, hdr.value_size);
+      return Status::OK();
+    }
+
+    std::string file_path_;
+    FSWritableFile* file_;
+    std::string buf_;
+    TableProperties props_;
+    uint64_t file_size_;
+  };
+
+  class DummyExternalTableIterator : public ExternalTableIterator {
+   public:
+    explicit DummyExternalTableIterator(
+        const ReadOptions& /*ro*/,
+        const std::map<std::string, std::string>& kv_map)
+        : scan_options_(nullptr),
+          num_opts_(0),
+          scan_idx_(0),
+          kv_map_(kv_map),
+          valid_(false) {
+      TEST_SYNC_POINT_CALLBACK("DummyExternalTableIterator::Constructor",
+                               &status_);
+    }
+
+    bool Valid() const override { return valid_; }
+
+    void SeekToFirst() override {
+      if (scan_options_) {
+        status_ = Status::InvalidArgument();
+      } else {
+        iter_ = kv_map_.begin();
+        valid_ = iter_ != kv_map_.end();
+        status_ = Status::OK();
+      }
+    }
+
+    void SeekToLast() override {
+      if (scan_options_) {
+        status_ = Status::InvalidArgument();
+      } else {
+        if (!kv_map_.empty()) {
+          iter_ = kv_map_.begin();
+          for (uint64_t i = 0; i < kv_map_.size() - 1; ++i) {
+            iter_++;
+          }
+          valid_ = true;
+        } else {
+          valid_ = false;
+        }
+        status_ = Status::OK();
+      }
+    }
+
+    void Seek(const Slice& target) override {
+      if (status_.ok()) {
+        iter_ = kv_map_.find(target.ToString());
+        valid_ = iter_ != kv_map_.end();
+        eof_ = iter_ == kv_map_.end();
+      }
+      if (scan_options_) {
+        if (scan_idx_ >= num_opts_ ||
+            target != scan_options_[scan_idx_].range.start.value().ToString()) {
+          status_ = Status::InvalidArgument();
+        } else {
+          if (valid_ && scan_options_[scan_idx_].range.limit.has_value() &&
+              iter_->first.compare(
+                  scan_options_[scan_idx_].range.limit.value().ToString()) >=
+                  0) {
+            valid_ = false;
+          }
+          scan_idx_++;
+        }
+      }
+    }
+
+    void SeekForPrev(const Slice& /*target*/) override {
+      valid_ = false;
+      status_ = Status::NotSupported();
+    }
+
+    void Next() override {
+      iter_++;
+      valid_ = iter_ != kv_map_.end();
+      eof_ = iter_ == kv_map_.end();
+      if (valid_ && scan_options_ &&
+          scan_options_[scan_idx_ - 1].range.limit.has_value() &&
+          iter_->first.compare(
+              scan_options_[scan_idx_ - 1].range.limit.value().ToString()) >=
+              0) {
+        valid_ = false;
+      }
+      // status_ is still ok. !valid_ indicates end of scan
+    }
+
+    bool NextAndGetResult(IterateResult* result) override {
+      Next();
+      if (valid_) {
+        result->key = key();
+        result->bound_check_result = IterBoundCheck::kInbound;
+        result->value_prepared = true;
+      } else {
+        result->key = Slice();
+        result->bound_check_result =
+            eof_ ? IterBoundCheck::kUnknown : IterBoundCheck::kOutOfBound;
+        result->value_prepared = false;
+      }
+      return valid_;
+    }
+
+    bool PrepareValue() override { return valid_ ? true : false; }
+
+    IterBoundCheck UpperBoundCheckResult() override {
+      return eof_ ? IterBoundCheck::kUnknown : IterBoundCheck::kOutOfBound;
+    }
+
+    void Prev() override {
+      valid_ = false;
+      status_ = Status::NotSupported();
+    }
+
+    Slice key() const override {
+      // If valid_ is false or status_ is non-ok, behavior is indeterminate
+      return Slice(iter_->first);
+    }
+
+    Status status() const override {
+      // status_ gets overwritten by next Seek
+      return status_;
+    }
+
+    Slice value() const override {
+      // If valid_ is false or status_ is non-ok, behavior is indeterminate
+      return Slice(iter_->second);
+    }
+
+    void Prepare(const ScanOptions scan_opts[], size_t num_opts) override {
+      scan_options_ = scan_opts;
+      num_opts_ = num_opts;
+    }
+
+   private:
+    const ScanOptions* scan_options_;
+    size_t num_opts_;
+    size_t scan_idx_;
+    std::map<std::string, std::string> kv_map_;
+    bool valid_ = false;
+    bool eof_ = false;
+    Status status_ = Status::OK();
+    std::map<std::string, std::string>::iterator iter_;
+  };
+
+  class DummyExternalTableReader : public ExternalTableReader {
+   public:
+    explicit DummyExternalTableReader(const std::string& file_path)
+        : file_(file_path, /*file=*/nullptr) {
+      Status s = file_.Deserialize(kv_map_);
+      EXPECT_OK(s);
+    }
+
+    ExternalTableIterator* NewIterator(
+        const ReadOptions& read_options,
+        const SliceTransform* /*prefix_extractor*/) override {
+      return new DummyExternalTableIterator(read_options, kv_map_);
+    }
+
+    Status Get(const ReadOptions& /*read_options*/, const Slice& key,
+               const SliceTransform* /*prefix_extractor*/,
+               std::string* value) override {
+      auto iter = kv_map_.find(key.ToString());
+      if (iter != kv_map_.end()) {
+        value->assign(iter->second);
+        return Status::OK();
+      }
+      return Status::NotFound();
+    }
+
+    void MultiGet(const ReadOptions& read_options,
+                  const std::vector<Slice>& keys,
+                  const SliceTransform* prefix_extractor,
+                  std::vector<std::string>* values,
+                  std::vector<Status>* statuses) override {
+      values->resize(keys.size());
+      statuses->resize(keys.size());
+      for (size_t i = 0; i < keys.size(); ++i) {
+        statuses->at(i) =
+            Get(read_options, keys[i], prefix_extractor, &values->at(i));
+      }
+    }
+
+    std::shared_ptr<const TableProperties> GetTableProperties() const override {
+      std::shared_ptr<TableProperties> props =
+          std::make_shared<TableProperties>();
+      props->comparator_name.assign(BytewiseComparator()->Name());
+      props->num_entries = 1;
+      props->raw_key_size = 3;
+      props->raw_value_size = 3;
+      return props;
+    }
+
+   private:
+    std::map<std::string, std::string> kv_map_;
+    DummyExternalTableFile file_;
+  };
+
+  class DummyExternalTableBuilder : public ExternalTableBuilder {
+   public:
+    explicit DummyExternalTableBuilder(const std::string& file_path,
+                                       FSWritableFile* file)
+        : file_(file_path, file) {}
+
+    void Add(const Slice& key, const Slice& value) override {
+      if (!kv_vec_.empty()) {
+        ASSERT_LT(BytewiseComparator()->Compare(kv_vec_.back().first, key), 0);
+      }
+      kv_vec_.emplace_back(key.ToString(), value.ToString());
+    }
+
+    Status Finish() override {
+      status_ = file_.Serialize(kv_vec_);
+      return status_;
+    }
+
+    void Abandon() override { kv_vec_.clear(); }
+
+    uint64_t FileSize() const override { return file_.FileSize(); }
+
+    TableProperties GetTableProperties() const override {
+      return file_.GetTableProperties();
+    }
+
+    Status status() const override { return status_; }
+
+   private:
+    std::vector<std::pair<std::string, std::string>> kv_vec_;
+    DummyExternalTableFile file_;
+    Status status_;
+  };
+
+  class DummyExternalTableFactory : public ExternalTableFactory {
+   public:
+    const char* Name() const override { return "DummyExternalTableFactory"; }
+
+    Status NewTableReader(
+        const ReadOptions& /*read_options*/, const std::string& file_path,
+        const ExternalTableOptions& topts,
+        std::unique_ptr<ExternalTableReader>* table_reader) const override {
+      // Sanity check some options
+      EXPECT_EQ(topts.file_options.handoff_checksum_type,
+                ChecksumType::kCRC32c);
+      table_reader->reset(new DummyExternalTableReader(file_path));
+      return Status::OK();
+    }
+
+    ExternalTableBuilder* NewTableBuilder(
+        const ExternalTableBuilderOptions& /*opts*/,
+        const std::string& file_path, FSWritableFile* file) const override {
+      return new DummyExternalTableBuilder(file_path, file);
+    }
+  };
+};
+
+TEST_F(ExternalTableReaderTest, BasicTest) {
+  std::shared_ptr<ExternalTableFactory> factory =
+      std::make_shared<DummyExternalTableFactory>();
+
+  std::string file_path = test::PerThreadDBPath("external_table");
+  {
+    std::unique_ptr<ExternalTableBuilder> builder;
+    builder.reset(factory->NewTableBuilder(
+        ExternalTableBuilderOptions(ReadOptions(), WriteOptions(),
+                                    std::shared_ptr<const SliceTransform>(),
+                                    BytewiseComparator(), "default",
+                                    TableFileCreationReason::kMisc),
+        file_path, /*file=*/nullptr));
+    builder->Add("foo", "bar");
+    ASSERT_OK(builder->Finish());
+  }
+
+  std::unique_ptr<ExternalTableReader> reader;
+  std::shared_ptr<SliceTransform> prefix_extractor;
+  ASSERT_OK(factory->NewTableReader(
+      {}, file_path,
+      ExternalTableOptions(prefix_extractor, /*comparator=*/nullptr,
+                           /*fs=*/nullptr, FileOptions()),
+      &reader));
+
+  ReadOptions ro;
+  std::unique_ptr<ExternalTableIterator> iter(reader->NewIterator(ro, nullptr));
+  ASSERT_NE(iter, nullptr);
+  iter->Seek("foo");
+  ASSERT_TRUE(iter->Valid() && iter->status().ok());
+  ASSERT_EQ(iter->value(), "bar");
+  iter->Next();
+  ASSERT_FALSE(iter->Valid());
+
+  std::string val;
+  ASSERT_OK(reader->Get({}, "foo", nullptr, &val));
+  ASSERT_EQ(val, "bar");
+
+  std::vector<std::string> vals;
+  std::vector<Status> statuses;
+  reader->MultiGet({}, {"foo", "bar"}, nullptr, &vals, &statuses);
+  ASSERT_EQ(vals.size(), 2);
+  ASSERT_EQ(statuses.size(), 2);
+  ASSERT_EQ(vals[0], "bar");
+  ASSERT_EQ(statuses[0], Status::OK());
+  ASSERT_EQ(statuses[1], Status::NotFound());
+}
+
+TEST_F(ExternalTableReaderTest, SstReaderTest) {
+  Options options = GetDefaultOptions();
+  std::string dbname = test::PerThreadDBPath("external_table_reader_test");
+  std::string ingest_file = dbname + "test.immutabledb";
+  dbname += "_db";
+  // This test doesn't work with some custom Envs, like EncryptedEnv
+  options.env = Env::Default();
+
+  std::shared_ptr<ExternalTableFactory> factory =
+      std::make_shared<DummyExternalTableFactory>();
+  options.table_factory = NewExternalTableFactory(factory);
+
+  std::unique_ptr<SstFileWriter> writer;
+  writer.reset(new SstFileWriter(EnvOptions(), options));
+  ASSERT_OK(writer->Open(ingest_file));
+  ASSERT_OK(writer->Put("foo", "bar"));
+  ASSERT_OK(writer->Finish());
+  writer.reset();
+
+  std::unique_ptr<SstFileReader> reader(new SstFileReader(options));
+  ASSERT_OK(reader->Open(ingest_file));
+
+  ReadOptions ro;
+  std::unique_ptr<Iterator> iter(reader->NewIterator(ro));
+  ASSERT_NE(iter, nullptr);
+  iter->Seek("foo");
+  ASSERT_TRUE(iter->Valid() && iter->status().ok());
+  ASSERT_EQ(iter->value(), "bar");
+  iter->Next();
+  ASSERT_FALSE(iter->Valid());
+  ASSERT_TRUE(iter->status().ok());
+}
+
+TEST_F(ExternalTableReaderTest, DBIterTest) {
+  Options options = GetDefaultOptions();
+  std::string dbname = test::PerThreadDBPath("external_table_reader_test");
+  std::string ingest_file = dbname + "test.immutable";
+  dbname += "_db";
+  // This test doesn't work with some custom Envs, like EncryptedEnv
+  options.env = Env::Default();
+  ASSERT_OK(DestroyDB(dbname, options));
+
+  std::shared_ptr<ExternalTableFactory> factory =
+      std::make_shared<DummyExternalTableFactory>();
+  options.table_factory = NewExternalTableFactory(factory);
+
+  // Create a file
+  std::unique_ptr<SstFileWriter> writer;
+  writer.reset(new SstFileWriter(EnvOptions(), options));
+  ASSERT_OK(writer->Open(ingest_file));
+  ASSERT_OK(writer->Put("foo", "bar"));
+  ASSERT_OK(writer->Put("foo2", "bar2"));
+  ASSERT_OK(writer->Finish());
+  writer.reset();
+
+  std::unique_ptr<DB> db;
+  options.create_if_missing = true;
+  Status s = DB::Open(options, dbname, &db);
+  ASSERT_OK(s);
+  ASSERT_TRUE(db != nullptr);
+  ColumnFamilyHandle* cfh = nullptr;
+  ASSERT_OK(db->CreateColumnFamily(options, "new_cf", &cfh));
+
+  IngestExternalFileOptions ifo;
+  ifo.allow_db_generated_files = true;
+  ifo.fill_cache = false;
+  s = db->IngestExternalFile(cfh, {ingest_file}, ifo);
+  ASSERT_OK(s);
+
+  std::unique_ptr<Iterator> iter(db->NewIterator({}, cfh));
+  ASSERT_NE(iter, nullptr);
+  iter->Seek("foo");
+  ASSERT_TRUE(iter->Valid() && iter->status().ok());
+  ASSERT_EQ(iter->value(), "bar");
+  iter->Next();
+  ASSERT_TRUE(iter->Valid() && iter->status().ok());
+  ASSERT_EQ(iter->key(), "foo2");
+  ASSERT_EQ(iter->value(), "bar2");
+  iter->Next();
+  ASSERT_FALSE(iter->Valid());
+  ASSERT_OK(iter->status());
+  iter.reset();
+
+  ASSERT_OK(db->DestroyColumnFamilyHandle(cfh));
+  ASSERT_OK(db->Close());
+}
+
+TEST_F(ExternalTableReaderTest, DBMultiScanTest) {
+  Options options = GetDefaultOptions();
+  std::string dbname = test::PerThreadDBPath("external_table_reader_test");
+  std::string ingest_file = dbname + "test.immutable";
+  dbname += "_db";
+  // This test doesn't work with some custom Envs, like EncryptedEnv
+  options.env = Env::Default();
+  ASSERT_OK(DestroyDB(dbname, options));
+
+  std::shared_ptr<ExternalTableFactory> factory =
+      std::make_shared<DummyExternalTableFactory>();
+  options.table_factory = NewExternalTableFactory(factory);
+
+  // Create a file
+  std::unique_ptr<SstFileWriter> writer;
+  writer.reset(new SstFileWriter(EnvOptions(), options));
+  ASSERT_OK(writer->Open(ingest_file));
+  for (int i = 0; i < 100; ++i) {
+    std::stringstream ss;
+    ss << std::setw(2) << std::setfill('0') << i;
+    ASSERT_OK(writer->Put("k" + ss.str(), "val" + ss.str()));
+  }
+  ASSERT_OK(writer->Finish());
+  writer.reset();
+
+  std::unique_ptr<DB> db;
+  options.create_if_missing = true;
+  Status s = DB::Open(options, dbname, &db);
+  ASSERT_OK(s);
+  ASSERT_TRUE(db != nullptr);
+  ColumnFamilyHandle* cfh = nullptr;
+  ASSERT_OK(db->CreateColumnFamily(options, "new_cf", &cfh));
+
+  IngestExternalFileOptions ifo;
+  ifo.allow_db_generated_files = true;
+  ifo.fill_cache = false;
+  s = db->IngestExternalFile(cfh, {ingest_file}, ifo);
+  ASSERT_OK(s);
+
+  std::vector<std::string> key_ranges({"k03", "k10", "k25", "k50"});
+  ReadOptions ro;
+  std::vector<ScanOptions> scan_options(
+      {ScanOptions(key_ranges[0], key_ranges[1]),
+       ScanOptions(key_ranges[2], key_ranges[3])});
+  std::unique_ptr<MultiScan> iter = db->NewMultiScan(ro, cfh, scan_options);
+  try {
+    int idx = 0;
+    int count = 0;
+    for (auto range : *iter) {
+      for (auto it : range) {
+        ASSERT_GE(it.first.ToString().compare(key_ranges[idx]), 0);
+        ASSERT_LT(it.first.ToString().compare(key_ranges[idx + 1]), 0);
+        count++;
+      }
+      idx += 2;
+    }
+    ASSERT_EQ(count, 32);
+  } catch (MultiScanException& ex) {
+    // Make sure exception contains the status
+    ASSERT_NOK(ex.status());
+    std::cerr << "Iterator returned status " << ex.what();
+    abort();
+  } catch (std::logic_error& ex) {
+    std::cerr << "Iterator returned logic error " << ex.what();
+    abort();
+  }
+  iter.reset();
+
+  // Test the overlapping scan case
+  key_ranges[1] = "k30";
+  scan_options[0] = ScanOptions(key_ranges[0], key_ranges[1]);
+  iter = db->NewMultiScan(ro, cfh, scan_options);
+  try {
+    int idx = 0;
+    int count = 0;
+    for (auto range : *iter) {
+      for (auto it : range) {
+        ASSERT_GE(it.first.ToString().compare(key_ranges[idx]), 0);
+        ASSERT_LT(it.first.ToString().compare(key_ranges[idx + 1]), 0);
+        count++;
+      }
+      idx += 2;
+    }
+    ASSERT_EQ(count, 52);
+  } catch (MultiScanException& ex) {
+    // Make sure exception contains the status
+    ASSERT_NOK(ex.status());
+    std::cerr << "Iterator returned status " << ex.what();
+    abort();
+  } catch (std::logic_error& ex) {
+    std::cerr << "Iterator returned logic error " << ex.what();
+    abort();
+  }
+  iter.reset();
+
+  // Test the no limit scan case
+  scan_options[0] = ScanOptions(key_ranges[0]);
+  scan_options[1] = ScanOptions(key_ranges[2]);
+  iter = db->NewMultiScan(ro, cfh, scan_options);
+  try {
+    int idx = 0;
+    int count = 0;
+    for (auto range : *iter) {
+      for (auto it : range) {
+        ASSERT_GE(it.first.ToString().compare(key_ranges[idx]), 0);
+        if (it.first.ToString().compare(key_ranges[idx + 1]) == 0) {
+          break;
+        }
+        count++;
+      }
+      idx += 2;
+    }
+    ASSERT_EQ(count, 52);
+  } catch (MultiScanException& ex) {
+    // Make sure exception contains the status
+    ASSERT_NOK(ex.status());
+    std::cerr << "Iterator returned status " << ex.what();
+    abort();
+  } catch (std::logic_error& ex) {
+    std::cerr << "Iterator returned logic error " << ex.what();
+    abort();
+  }
+  iter.reset();
+
+  SyncPoint::GetInstance()->SetCallBack(
+      "DummyExternalTableIterator::Constructor", [](void* arg) {
+        Status* status = static_cast<Status*>(arg);
+        *status = Status::IOError();
+      });
+  SyncPoint::GetInstance()->EnableProcessing();
+  iter = db->NewMultiScan(ro, cfh, scan_options);
+  try {
+    for (auto range : *iter) {
+      // Should not get here. Iterator should throw an exception
+      assert(false);
+      for (auto it : range) {
+        (void)it;
+        assert(false);
+      }
+    }
+  } catch (MultiScanException& ex) {
+    // Make sure exception contains the status
+    ASSERT_EQ(ex.status(), Status::IOError());
+  } catch (std::logic_error& ex) {
+    std::cerr << "Iterator returned logic error " << ex.what();
+    abort();
+  }
+  iter.reset();
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  ASSERT_OK(db->DestroyColumnFamilyHandle(cfh));
+  ASSERT_OK(db->Close());
+}
 }  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {
+  // Opt-in this whole test file
+  ROCKSDB_NAMESPACE::BlockBasedTableFactory::AllowUnsupportedFormatVersion() =
+      true;
+
   ROCKSDB_NAMESPACE::port::InstallStackTraceHandler();
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

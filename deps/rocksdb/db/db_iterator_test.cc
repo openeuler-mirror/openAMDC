@@ -2544,6 +2544,145 @@ TEST_P(DBIteratorTest, RefreshWithSnapshot) {
   ASSERT_OK(db_->Close());
 }
 
+TEST_P(DBIteratorTest, AutoRefreshIterator) {
+  constexpr int kNumKeys = 1000;
+  Options options = CurrentOptions();
+  options.disable_auto_compactions = true;
+  for (const DBIter::Direction direction :
+       {DBIter::kForward, DBIter::kReverse}) {
+    for (const bool auto_refresh_enabled : {false, true}) {
+      for (const bool explicit_snapshot : {false, true}) {
+        DestroyAndReopen(options);
+        // Multi dimensional iterator:
+        //
+        // L0 (level iterator): [key000000]
+        // L1 (table iterator): [key000001]
+        // Memtable           : [key000000, key000999]
+        for (int i = 0; i < kNumKeys + 2; i++) {
+          ASSERT_OK(Put(Key(i % kNumKeys), "val" + std::to_string(i)));
+          if (i <= 1) {
+            ASSERT_OK(Flush());
+          }
+          if (i == 0) {
+            MoveFilesToLevel(1);
+          }
+        }
+
+        ReadOptions read_options;
+        std::unique_ptr<ManagedSnapshot> snapshot = nullptr;
+        if (explicit_snapshot) {
+          snapshot = std::make_unique<ManagedSnapshot>(db_);
+        }
+        read_options.snapshot =
+            explicit_snapshot ? snapshot->snapshot() : nullptr;
+        read_options.auto_refresh_iterator_with_snapshot = auto_refresh_enabled;
+        std::unique_ptr<Iterator> iter(NewIterator(read_options));
+
+        int trigger_compact_on_it = kNumKeys / 2;
+
+        // This update should NOT be visible from the iterator.
+        ASSERT_OK(Put(Key(trigger_compact_on_it + 1), "new val"));
+
+        ASSERT_EQ(1, NumTableFilesAtLevel(1));
+        ASSERT_EQ(1, NumTableFilesAtLevel(0));
+
+        uint64_t all_memtables_size_before_refresh;
+        uint64_t all_memtables_size_after_refresh;
+
+        std::string prop_value;
+        ASSERT_OK(iter->GetProperty("rocksdb.iterator.super-version-number",
+                                    &prop_value));
+        int superversion_number = std::stoi(prop_value);
+
+        std::vector<LiveFileMetaData> old_files;
+        db_->GetLiveFilesMetaData(&old_files);
+
+        int expected_next_key_int;
+        if (direction == DBIter::kForward) {
+          expected_next_key_int = 0;
+          iter->SeekToFirst();
+        } else {  // DBIter::kReverse
+          expected_next_key_int = kNumKeys - 1;
+          iter->SeekToLast();
+        }
+
+        int it_num = 0;
+        std::unordered_map<std::string, std::string> kvs;
+        while (iter->Valid()) {
+          ASSERT_OK(iter->status());
+          it_num++;
+          if (it_num == trigger_compact_on_it) {
+            // Bump the superversion by manually scheduling flush + compaction.
+            ASSERT_OK(Flush());
+            ASSERT_OK(dbfull()->CompactRange(CompactRangeOptions(), nullptr,
+                                             nullptr));
+            ASSERT_OK(dbfull()->TEST_WaitForBackgroundWork());
+
+            // For accuracy, capture the memtables size right before consecutive
+            // iterator call to Next() will update its' stale superversion ref.
+            dbfull()->GetIntProperty("rocksdb.size-all-mem-tables",
+                                     &all_memtables_size_before_refresh);
+          }
+
+          if (it_num == trigger_compact_on_it + 1) {
+            dbfull()->GetIntProperty("rocksdb.size-all-mem-tables",
+                                     &all_memtables_size_after_refresh);
+            ASSERT_OK(iter->GetProperty("rocksdb.iterator.super-version-number",
+                                        &prop_value));
+            uint64_t new_superversion_number = std::stoi(prop_value);
+            Status expected_status_for_preexisting_files;
+            if (auto_refresh_enabled && explicit_snapshot) {
+              // Iterator is expected to detect its' superversion staleness.
+              ASSERT_LT(superversion_number, new_superversion_number);
+              // ... and since our iterator was the only reference to that very
+              // superversion, we expect most of the active memory to be
+              // returned upon automatical iterator refresh.
+              ASSERT_GT(all_memtables_size_before_refresh,
+                        all_memtables_size_after_refresh);
+              expected_status_for_preexisting_files = Status::NotFound();
+            } else {
+              ASSERT_EQ(superversion_number, new_superversion_number);
+              ASSERT_EQ(all_memtables_size_after_refresh,
+                        all_memtables_size_before_refresh);
+              expected_status_for_preexisting_files = Status::OK();
+            }
+
+            for (const auto& file : old_files) {
+              ASSERT_EQ(env_->FileExists(file.db_path + "/" + file.name),
+                        expected_status_for_preexisting_files);
+            }
+          }
+
+          // Ensure we're visiting the keys in desired order and at most once!
+          ASSERT_EQ(IdFromKey(iter->key().ToString()), expected_next_key_int);
+          kvs[iter->key().ToString()] = iter->value().ToString();
+
+          if (direction == DBIter::kForward) {
+            iter->Next();
+            expected_next_key_int++;
+          } else {
+            iter->Prev();
+            expected_next_key_int--;
+          }
+        }
+        ASSERT_OK(iter->status());
+
+        // Data validation.
+        ASSERT_EQ(kvs.size(), kNumKeys);
+        for (int i = 0; i < kNumKeys; i++) {
+          auto kv = kvs.find(Key(i));
+          ASSERT_TRUE(kv != kvs.end());
+          int val = i;
+          if (i <= 1) {
+            val += kNumKeys;
+          }
+          ASSERT_EQ(kv->second, "val" + std::to_string(val));
+        }
+      }
+    }
+  }
+}
+
 TEST_P(DBIteratorTest, CreationFailure) {
   SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::NewInternalIterator:StatusCallback", [](void* arg) {
@@ -3685,6 +3824,166 @@ TEST_F(DBIteratorTest, IteratorsConsistentViewExplicitSnapshot) {
   }
 }
 
+TEST_P(DBIteratorTest, MemtableOpsScanFlushTriggerWithSeek) {
+  // Tests that option memtable_op_scan_flush_trigger works when the limit
+  // is reached during a Seek() operation.
+  const int kTrigger = 10;
+  Random* r = Random::GetTLSInstance();
+
+  for (int trigger : {kTrigger, kTrigger + 1}) {
+    for (bool delete_only : {false, true}) {
+      Options options;
+      options.create_if_missing = true;
+      options.memtable_op_scan_flush_trigger = trigger;
+      options.level_compaction_dynamic_level_bytes = true;
+      DestroyAndReopen(options);
+
+      // Base data that will be covered by a consecutive sequence of tombstones.
+      int kNumKeys = delete_only ? kTrigger : kTrigger / 2;
+      for (int i = 0; i < kNumKeys; ++i) {
+        ASSERT_OK(Put(Key(i), r->RandomString(100)));
+      }
+      ASSERT_OK(Flush());
+      ASSERT_OK(db_->CompactRange({}, nullptr, nullptr));
+      ASSERT_EQ(1, NumTableFilesAtLevel(6));
+
+      if (delete_only) {
+        for (int i = 0; i < kNumKeys; ++i) {
+          ASSERT_OK(SingleDelete(Key(i)));
+        }
+      } else {
+        for (int i = 0; i < kNumKeys; ++i) {
+          ASSERT_OK(Put(Key(i), r->RandomString(100)));
+        }
+        for (int i = 0; i < kNumKeys; ++i) {
+          ASSERT_OK(Delete(Key(i)));
+        }
+      }
+
+      SetPerfLevel(PerfLevel::kEnableCount);
+      get_perf_context()->Reset();
+      ReadOptions ro;
+      std::unique_ptr<Iterator> iter(db_->NewIterator(ro));
+
+      // Seek to the first key, this will scan through all the tombstones and
+      // hidden puts
+      iter->Seek(Key(0));
+      ASSERT_FALSE(
+          iter->Valid());  // All keys are deleted, so iterator is not valid
+      ASSERT_OK(iter->status());
+      ASSERT_EQ(get_perf_context()->next_on_memtable_count, kTrigger);
+
+      // Skipping kNumTrigger memtable entries in a single iterator operation
+      // should mark the memtable for flush.
+      //
+      // At the end of a write, we check and update memtable to request a flush
+      ASSERT_OK(Put(Key(11), "val"));
+      // Before a write, we schedule memtables for flush if requested.
+      ASSERT_OK(Put(Key(12), "val"));
+      ASSERT_OK(db_->WaitForCompact({}));
+
+      if (trigger <= kTrigger) {
+        // Check if memtable was flushed due to scan trigger
+        ASSERT_EQ(1, NumTableFilesAtLevel(0));
+        uint64_t val = 0;
+        ASSERT_TRUE(
+            db_->GetIntProperty("rocksdb.num-deletes-active-mem-table", &val));
+        ASSERT_EQ(0, val);
+      } else {
+        uint64_t val = 0;
+        ASSERT_TRUE(
+            db_->GetIntProperty("rocksdb.num-deletes-active-mem-table", &val));
+        ASSERT_EQ(kNumKeys, val);
+      }
+    }
+  }
+}
+
+TEST_P(DBIteratorTest, MemtableOpsScanFlushTriggerWithNext) {
+  // Tests that option memtable_op_scan_flush_trigger works when the limit
+  // is reached during a Next() operation, and not trigger a flush when
+  // the limit is reached across multiple Next() operations.
+  const int kTrigger = 10;
+  Random* r = Random::GetTLSInstance();
+
+  for (int trigger : {kTrigger, kTrigger + 1}) {
+    for (bool delete_only : {false, true}) {
+      Options options;
+      options.create_if_missing = true;
+      options.memtable_op_scan_flush_trigger = trigger;
+      options.level_compaction_dynamic_level_bytes = true;
+      DestroyAndReopen(options);
+
+      // Base data that will be covered by a consecutive sequence of tombstones.
+      int kNumKeys = delete_only ? kTrigger : kTrigger / 2;
+      for (int i = 0; i <= kNumKeys; ++i) {
+        ASSERT_OK(Put(Key(i), r->RandomString(100)));
+      }
+      ASSERT_OK(Flush());
+      ASSERT_OK(db_->CompactRange({}, nullptr, nullptr));
+      ASSERT_EQ(1, NumTableFilesAtLevel(6));
+
+      ASSERT_OK(Put(Key(0), "val"));
+      if (delete_only) {
+        for (int i = 1; i <= kNumKeys; ++i) {
+          ASSERT_OK(SingleDelete(Key(i)));
+        }
+      } else {
+        for (int i = 1; i <= kNumKeys; ++i) {
+          ASSERT_OK(Put(Key(i), r->RandomString(100)));
+        }
+        for (int i = 1; i <= kNumKeys; ++i) {
+          ASSERT_OK(Delete(Key(i)));
+        }
+      }
+
+      // Total number of tombstones and hidden puts scanned across multiple
+      // Next() operations below will be kTrigger, and it should not trigger a
+      // flush when the limit is kTrigger + 1.
+      ASSERT_OK(Put(Key(kNumKeys + 1), "v1"));
+      ASSERT_OK(Delete(Key(kNumKeys + 2)));
+      ASSERT_OK(Put(Key(kNumKeys + 3), "v3"));
+
+      SetPerfLevel(PerfLevel::kEnableCount);
+      get_perf_context()->Reset();
+      ReadOptions ro;
+      std::unique_ptr<Iterator> iter(db_->NewIterator(ro));
+      iter->Seek(Key(0));
+      ASSERT_TRUE(iter->Valid());
+      ASSERT_EQ(iter->value(), "val");
+      ASSERT_OK(iter->status());
+      ASSERT_EQ(get_perf_context()->next_on_memtable_count, 0);
+      iter->Next();
+      // kTrigger tombstones and invisible puts and 1 for the visible put
+      ASSERT_EQ(get_perf_context()->next_on_memtable_count, kTrigger + 1);
+      iter->Next();
+      ASSERT_EQ(get_perf_context()->next_on_memtable_count, kTrigger + 3);
+
+      // Skipping kNumTrigger memtable entries in a single iterator operation
+      // should mark the memtable for flush.
+      //
+      // At the end of a write, we check and update memtable to request a flush
+      ASSERT_OK(Put(Key(11), "val"));
+      // Before a write, we schedule memtables for flush if requested.
+      ASSERT_OK(Put(Key(12), "val"));
+      ASSERT_OK(db_->WaitForCompact({}));
+
+      if (trigger <= kTrigger) {
+        // Check if memtable was flushed due to scan trigger
+        ASSERT_EQ(1, NumTableFilesAtLevel(0));
+        uint64_t val = 0;
+        ASSERT_TRUE(
+            db_->GetIntProperty("rocksdb.num-deletes-active-mem-table", &val));
+        ASSERT_EQ(0, val);
+      } else {
+        uint64_t val = 0;
+        ASSERT_TRUE(
+            db_->GetIntProperty("rocksdb.num-deletes-active-mem-table", &val));
+        ASSERT_EQ(kNumKeys + 1, val);
+      }
+    }
+  }
+}
 }  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {

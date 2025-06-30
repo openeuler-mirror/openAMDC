@@ -40,8 +40,6 @@ struct ImmutableCFOptions {
 
   int min_write_buffer_number_to_merge;
 
-  int max_write_buffer_number_to_maintain;
-
   int64_t max_write_buffer_size_to_maintain;
 
   bool inplace_update_support;
@@ -68,11 +66,9 @@ struct ImmutableCFOptions {
 
   bool force_consistency_checks;
 
+  bool disallow_memtable_writes;
+
   Temperature default_temperature;
-
-  uint64_t preclude_last_level_data_seconds;
-
-  uint64_t preserve_internal_time_seconds;
 
   std::shared_ptr<const SliceTransform>
       memtable_insert_with_hint_prefix_extractor;
@@ -142,6 +138,9 @@ struct MutableCFOptions {
             options.max_bytes_for_level_multiplier_additional),
         compaction_options_fifo(options.compaction_options_fifo),
         compaction_options_universal(options.compaction_options_universal),
+        preclude_last_level_data_seconds(
+            options.preclude_last_level_data_seconds),
+        preserve_internal_time_seconds(options.preserve_internal_time_seconds),
         enable_blob_files(options.enable_blob_files),
         min_blob_size(options.min_blob_size),
         blob_file_size(options.blob_file_size),
@@ -174,7 +173,8 @@ struct MutableCFOptions {
         memtable_max_range_deletions(options.memtable_max_range_deletions),
         bottommost_file_compaction_delay(
             options.bottommost_file_compaction_delay),
-        uncache_aggressiveness(options.uncache_aggressiveness) {
+        uncache_aggressiveness(options.uncache_aggressiveness),
+        memtable_op_scan_flush_trigger(options.memtable_op_scan_flush_trigger) {
     RefreshDerivedOptions(options.num_levels, options.compaction_style);
   }
 
@@ -204,6 +204,8 @@ struct MutableCFOptions {
         ttl(0),
         periodic_compaction_seconds(0),
         compaction_options_fifo(),
+        preclude_last_level_data_seconds(0),
+        preserve_internal_time_seconds(0),
         enable_blob_files(false),
         min_blob_size(0),
         blob_file_size(0),
@@ -223,10 +225,12 @@ struct MutableCFOptions {
         default_write_temperature(Temperature::kUnknown),
         memtable_protection_bytes_per_key(0),
         block_protection_bytes_per_key(0),
+        paranoid_memory_checks(false),
         sample_for_compression(0),
         memtable_max_range_deletions(0),
         bottommost_file_compaction_delay(0),
-        uncache_aggressiveness(0) {}
+        uncache_aggressiveness(0),
+        memtable_op_scan_flush_trigger(0) {}
 
   explicit MutableCFOptions(const Options& options);
 
@@ -246,6 +250,10 @@ struct MutableCFOptions {
   }
 
   void Dump(Logger* log) const;
+
+#if __cplusplus >= 202002L
+  bool operator==(const MutableCFOptions& rhs) const = default;
+#endif
 
   // Memtable related options
   size_t write_buffer_size;
@@ -296,6 +304,8 @@ struct MutableCFOptions {
   std::vector<int> max_bytes_for_level_multiplier_additional;
   CompactionOptionsFIFO compaction_options_fifo;
   CompactionOptionsUniversal compaction_options_universal;
+  uint64_t preclude_last_level_data_seconds;
+  uint64_t preserve_internal_time_seconds;
 
   // Blob file related options
   bool enable_blob_files;
@@ -328,6 +338,7 @@ struct MutableCFOptions {
   uint32_t memtable_max_range_deletions;
   uint32_t bottommost_file_compaction_delay;
   uint32_t uncache_aggressiveness;
+  uint32_t memtable_op_scan_flush_trigger;
 
   // Derived options
   // Per-level target file size.
@@ -337,9 +348,10 @@ struct MutableCFOptions {
 uint64_t MultiplyCheckOverflow(uint64_t op1, double op2);
 
 // Get the max file size in a given level.
-uint64_t MaxFileSizeForLevel(const MutableCFOptions& cf_options,
-    int level, CompactionStyle compaction_style, int base_level = 1,
-    bool level_compaction_dynamic_level_bytes = false);
+uint64_t MaxFileSizeForLevel(const MutableCFOptions& cf_options, int level,
+                             CompactionStyle compaction_style,
+                             int base_level = 1,
+                             bool level_compaction_dynamic_level_bytes = false);
 
 // Get the max size of an L0 file for which we will pin its meta-blocks when
 // `pin_l0_filter_and_index_blocks_in_cache` is set.
@@ -353,5 +365,10 @@ Status GetMutableOptionsFromStrings(
     const MutableCFOptions& base_options,
     const std::unordered_map<std::string, std::string>& options_map,
     Logger* info_log, MutableCFOptions* new_options);
+
+#ifndef NDEBUG
+std::vector<std::string> TEST_GetImmutableInMutableCFOptions();
+extern bool TEST_allowSetOptionsImmutableInMutable;
+#endif
 
 }  // namespace ROCKSDB_NAMESPACE

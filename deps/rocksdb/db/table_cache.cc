@@ -53,13 +53,11 @@ static Slice GetSliceForFileNumber(const uint64_t* file_number) {
                sizeof(*file_number));
 }
 
-
 void AppendVarint64(IterKey* key, uint64_t v) {
   char buf[10];
   auto ptr = EncodeVarint64(buf, v);
   key->TrimAppend(key->Size(), buf, ptr - buf);
 }
-
 
 }  // anonymous namespace
 
@@ -207,6 +205,7 @@ Status TableCache::FindTable(
       RecordTick(ioptions_.stats, NO_FILE_ERRORS);
       // We do not cache error results so that if the error is transient,
       // or somebody repairs the file, we recover automatically.
+      IGNORE_STATUS_IF_ERROR(s);
     } else {
       s = cache_.Insert(key, table_reader.get(), 1, handle);
       if (s.ok()) {
@@ -726,13 +725,19 @@ uint64_t TableCache::ApproximateSize(
   return result;
 }
 
-void TableCache::ReleaseObsolete(Cache* cache, Cache::Handle* h,
+void TableCache::ReleaseObsolete(Cache* cache, uint64_t file_number,
+                                 Cache::Handle* h,
                                  uint32_t uncache_aggressiveness) {
   CacheInterface typed_cache(cache);
   TypedHandle* table_handle = reinterpret_cast<TypedHandle*>(h);
-  TableReader* table_reader = typed_cache.Value(table_handle);
-  table_reader->MarkObsolete(uncache_aggressiveness);
-  typed_cache.ReleaseAndEraseIfLastRef(table_handle);
+  if (table_handle == nullptr) {
+    table_handle = typed_cache.Lookup(GetSliceForFileNumber(&file_number));
+  }
+  if (table_handle != nullptr) {
+    TableReader* table_reader = typed_cache.Value(table_handle);
+    table_reader->MarkObsolete(uncache_aggressiveness);
+    typed_cache.ReleaseAndEraseIfLastRef(table_handle);
+  }
 }
 
 }  // namespace ROCKSDB_NAMESPACE

@@ -29,6 +29,8 @@ struct Options;
 // treat errors (e.g. ignore_unknown_objects), the format
 // of the serialization (e.g. delimiter), and how to compare
 // options (sanity_level).
+// NOTE: members of this struct make it potentially problematic for
+// static storage duration ("static initialization order fiasco")
 struct ConfigOptions {
   // Constructs a new ConfigOptions with a new object registry.
   // This method should only be used when a DBOptions is not available,
@@ -106,7 +108,6 @@ struct ConfigOptions {
     return (level > SanityLevel::kSanityLevelNone && level <= sanity_level);
   }
 };
-
 
 // The following set of functions provide a way to construct RocksDB Options
 // from a string or a string-to-string map.  Here is the general rule of
@@ -409,7 +410,7 @@ Status GetStringFromColumnFamilyOptions(std::string* opts_str,
 Status GetStringFromCompressionType(std::string* compression_str,
                                     CompressionType compression_type);
 
-std::vector<CompressionType> GetSupportedCompressions();
+const std::vector<CompressionType>& GetSupportedCompressions();
 
 Status GetBlockBasedTableOptionsFromString(
     const ConfigOptions& config_options,
@@ -449,6 +450,22 @@ Status DeleteFilesInRange(DB* db, ColumnFamilyHandle* column_family,
 // Delete files in multiple ranges at once
 // Delete files in a lot of ranges one at a time can be slow, use this API for
 // better performance in that case.
+Status DeleteFilesInRanges(DB* db, ColumnFamilyHandle* column_family,
+                           const RangeOpt* ranges, size_t n,
+                           bool include_end = true);
+
+// DEPRECATED
+struct RangePtr {
+  // In case of user_defined timestamp, if enabled, `start` and `limit` should
+  // point to key without timestamp part.
+  const Slice* start;
+  const Slice* limit;
+
+  RangePtr() : start(nullptr), limit(nullptr) {}
+  RangePtr(const Slice* s, const Slice* l) : start(s), limit(l) {}
+};
+
+// DEPRECATED
 Status DeleteFilesInRanges(DB* db, ColumnFamilyHandle* column_family,
                            const RangePtr* ranges, size_t n,
                            bool include_end = true);

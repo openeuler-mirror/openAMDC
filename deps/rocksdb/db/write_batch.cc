@@ -815,6 +815,12 @@ WriteBatchInternal::GetColumnFamilyIdAndTimestampSize(
         s = Status::InvalidArgument("Default cf timestamp size mismatch");
       }
     }
+    auto* cfd =
+        static_cast_with_check<ColumnFamilyHandleImpl>(column_family)->cfd();
+    if (cfd && cfd->ioptions().disallow_memtable_writes) {
+      s = Status::InvalidArgument(
+          "This column family has disallow_memtable_writes=true");
+    }
   } else if (b->default_cf_ts_sz_ > 0) {
     ts_sz = b->default_cf_ts_sz_;
   }
@@ -835,6 +841,12 @@ Status CheckColumnFamilyTimestampSize(ColumnFamilyHandle* column_family,
   }
   if (cf_ts_sz != ts.size()) {
     return Status::InvalidArgument("timestamp size mismatch");
+  }
+  auto* cfd =
+      static_cast_with_check<ColumnFamilyHandleImpl>(column_family)->cfd();
+  if (cfd && cfd->ioptions().disallow_memtable_writes) {
+    return Status::InvalidArgument(
+        "This column family has disallow_memtable_writes=true");
   }
   return Status::OK();
 }
@@ -2185,6 +2197,13 @@ class MemTableInserter : public WriteBatch::Handler {
       }
       return false;
     }
+    auto* current = cf_mems_->current();
+    if (current && current->ioptions().disallow_memtable_writes) {
+      *s = Status::InvalidArgument(
+          "This column family has disallow_memtable_writes=true");
+      return false;
+    }
+
     if (recovering_log_number_ != 0 &&
         recovering_log_number_ < cf_mems_->GetLogNumber()) {
       // This is true only in recovery environment (recovering_log_number_ is
@@ -2928,10 +2947,9 @@ class MemTableInserter : public WriteBatch::Handler {
       auto* cfd = cf_mems_->current();
 
       assert(cfd);
-      assert(cfd->ioptions());
 
       const size_t size_to_maintain = static_cast<size_t>(
-          cfd->ioptions()->max_write_buffer_size_to_maintain);
+          cfd->ioptions().max_write_buffer_size_to_maintain);
 
       if (size_to_maintain > 0) {
         MemTableList* const imm = cfd->imm();

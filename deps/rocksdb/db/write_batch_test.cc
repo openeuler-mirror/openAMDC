@@ -59,7 +59,8 @@ static std::string PrintContents(WriteBatch* b,
     InternalIterator* iter;
     if (i == 0) {
       iter = mem->NewIterator(ReadOptions(), /*seqno_to_time_mapping=*/nullptr,
-                              &arena, /*prefix_extractor=*/nullptr);
+                              &arena, /*prefix_extractor=*/nullptr,
+                              /*for_flush=*/false);
       arena_iter_guard.reset(iter);
     } else {
       iter = mem->NewRangeTombstoneIterator(ReadOptions(),
@@ -855,15 +856,16 @@ TEST_F(WriteBatchTest, ColumnFamiliesBatchWithIndexTest) {
   iter->Seek("eightfoo");
   ASSERT_OK(iter->status());
   ASSERT_TRUE(iter->Valid());
-  ASSERT_EQ(WriteType::kPutRecord, iter->Entry().type);
+  // For the same key, most recent update is ordered first.
+  ASSERT_EQ(WriteType::kDeleteRecord, iter->Entry().type);
   ASSERT_EQ("eightfoo", iter->Entry().key.ToString());
-  ASSERT_EQ("bar8", iter->Entry().value.ToString());
 
   iter->Next();
   ASSERT_OK(iter->status());
   ASSERT_TRUE(iter->Valid());
-  ASSERT_EQ(WriteType::kDeleteRecord, iter->Entry().type);
+  ASSERT_EQ(WriteType::kPutRecord, iter->Entry().type);
   ASSERT_EQ("eightfoo", iter->Entry().key.ToString());
+  ASSERT_EQ("bar8", iter->Entry().value.ToString());
 
   iter->Next();
   ASSERT_OK(iter->status());
@@ -873,15 +875,15 @@ TEST_F(WriteBatchTest, ColumnFamiliesBatchWithIndexTest) {
   iter->Seek("twofoo");
   ASSERT_OK(iter->status());
   ASSERT_TRUE(iter->Valid());
-  ASSERT_EQ(WriteType::kPutRecord, iter->Entry().type);
+  ASSERT_EQ(WriteType::kSingleDeleteRecord, iter->Entry().type);
   ASSERT_EQ("twofoo", iter->Entry().key.ToString());
-  ASSERT_EQ("bar2", iter->Entry().value.ToString());
 
   iter->Next();
   ASSERT_OK(iter->status());
   ASSERT_TRUE(iter->Valid());
-  ASSERT_EQ(WriteType::kSingleDeleteRecord, iter->Entry().type);
+  ASSERT_EQ(WriteType::kPutRecord, iter->Entry().type);
   ASSERT_EQ("twofoo", iter->Entry().key.ToString());
+  ASSERT_EQ("bar2", iter->Entry().value.ToString());
 
   iter->Next();
   ASSERT_OK(iter->status());

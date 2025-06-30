@@ -122,13 +122,6 @@ class PessimisticTransaction : public TransactionBaseImpl {
                      ColumnFamilyHandle* column_family = nullptr) override;
 
  protected:
-  // Refer to
-  // TransactionOptions::use_only_the_last_commit_time_batch_for_recovery
-  bool use_only_the_last_commit_time_batch_for_recovery_ = false;
-  // Refer to
-  // TransactionOptions::skip_prepare
-  bool skip_prepare_ = false;
-
   virtual Status PrepareInternal() = 0;
 
   virtual Status CommitWithoutPrepareInternal() = 0;
@@ -166,6 +159,17 @@ class PessimisticTransaction : public TransactionBaseImpl {
   // performed blind writes or Get, though.
   TxnTimestamp read_timestamp_{kMaxTxnTimestamp};
   TxnTimestamp commit_timestamp_{kMaxTxnTimestamp};
+
+  // Refer to
+  // TransactionOptions::use_only_the_last_commit_time_batch_for_recovery
+  bool use_only_the_last_commit_time_batch_for_recovery_ = false;
+  // Refer to
+  // TransactionOptions::skip_prepare
+  bool skip_prepare_ = false;
+  // Refer to
+  // TransactionOptions::commit_bypass_memtable
+  uint32_t commit_bypass_memtable_threshold_ =
+      std::numeric_limits<uint32_t>::max();
 
  private:
   friend class TransactionTest_ValidateSnapshotTest_Test;

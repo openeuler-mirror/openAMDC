@@ -91,7 +91,7 @@ class FlushJob {
              bool* skipped_since_bg_error = nullptr,
              ErrorHandler* error_handler = nullptr);
   void Cancel();
-  const autovector<MemTable*>& GetMemTables() const { return mems_; }
+  const autovector<ReadOnlyMemTable*>& GetMemTables() const { return mems_; }
 
   std::list<std::unique_ptr<FlushJobInfo>>* GetCommittedFlushJobsInfo() {
     return &committed_flush_jobs_info_;
@@ -101,7 +101,7 @@ class FlushJob {
   friend class FlushJobTest_GetRateLimiterPriorityForWrite_Test;
 
   void ReportStartedFlush();
-  void ReportFlushInputSize(const autovector<MemTable*>& mems);
+  static void ReportFlushInputSize(const autovector<ReadOnlyMemTable*>& mems);
   void RecordFlushIOStats();
   Status WriteLevel0Table();
 
@@ -205,7 +205,9 @@ class FlushJob {
 
   // Variables below are set by PickMemTable():
   FileMetaData meta_;
-  autovector<MemTable*> mems_;
+  // Memtables to be flushed by this job.
+  // Ordered by increasing memtable id, i.e., oldest memtable first.
+  autovector<ReadOnlyMemTable*> mems_;
   VersionEdit* edit_;
   Version* base_;
   bool pick_memtable_called;
@@ -232,7 +234,7 @@ class FlushJob {
 
   // The current minimum seqno that compaction jobs will preclude the data from
   // the last level. Data with seqnos larger than this or larger than
-  // `earliest_snapshot_` will be output to the penultimate level had it gone
+  // `earliest_snapshot_` will be output to the proximal level had it gone
   // through a compaction to the last level.
   SequenceNumber preclude_last_level_min_seqno_ = kMaxSequenceNumber;
 };

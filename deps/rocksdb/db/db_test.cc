@@ -59,11 +59,13 @@
 #include "rocksdb/utilities/checkpoint.h"
 #include "rocksdb/utilities/optimistic_transaction_db.h"
 #include "rocksdb/utilities/write_batch_with_index.h"
+#include "table/block_based/block_based_table_factory.h"
 #include "table/mock_table.h"
 #include "test_util/sync_point.h"
 #include "test_util/testharness.h"
 #include "test_util/testutil.h"
 #include "util/compression.h"
+#include "util/defer.h"
 #include "util/mutexlock.h"
 #include "util/random.h"
 #include "util/rate_limiter_impl.h"
@@ -1160,7 +1162,6 @@ class DelayFilterFactory : public CompactionFilterFactory {
   DBTestBase* db_test;
 };
 }  // anonymous namespace
-
 
 static std::string CompressibleString(Random* rnd, int len) {
   std::string r;
@@ -3181,6 +3182,15 @@ class ModelDB : public DB {
     return Status();
   }
 
+  using DB::GetPropertiesOfTablesByLevel;
+  Status GetPropertiesOfTablesByLevel(
+      ColumnFamilyHandle* /* column_family */,
+      std::vector<
+          std::unique_ptr<TablePropertiesCollection>>* /* props_by_level */)
+      override {
+    return Status();
+  }
+
   using DB::KeyMayExist;
   bool KeyMayExist(const ReadOptions& /*options*/,
                    ColumnFamilyHandle* /*column_family*/, const Slice& /*key*/,
@@ -3341,11 +3351,6 @@ class ModelDB : public DB {
   using DB::NumberLevels;
   int NumberLevels(ColumnFamilyHandle* /*column_family*/) override { return 1; }
 
-  using DB::MaxMemCompactionLevel;
-  int MaxMemCompactionLevel(ColumnFamilyHandle* /*column_family*/) override {
-    return 1;
-  }
-
   using DB::Level0StopWriteTrigger;
   int Level0StopWriteTrigger(ColumnFamilyHandle* /*column_family*/) override {
     return -1;
@@ -3402,15 +3407,13 @@ class ModelDB : public DB {
   }
 
   Status GetCurrentWalFile(
-      std::unique_ptr<LogFile>* /*current_log_file*/) override {
+      std::unique_ptr<LogFile>* /*current_wal_file*/) override {
     return Status::OK();
   }
 
   Status GetCreationTimeOfOldestFile(uint64_t* /*creation_time*/) override {
     return Status::NotSupported();
   }
-
-  Status DeleteFile(std::string /*name*/) override { return Status::OK(); }
 
   Status GetUpdatesSince(
       ROCKSDB_NAMESPACE::SequenceNumber,
@@ -3440,6 +3443,11 @@ class ModelDB : public DB {
 
   Status GetFullHistoryTsLow(ColumnFamilyHandle* /*cf*/,
                              std::string* /*ts_low*/) override {
+    return Status::OK();
+  }
+
+  Status GetNewestUserDefinedTimestamp(
+      ColumnFamilyHandle* /*cf*/, std::string* /*newest_timestamp*/) override {
     return Status::OK();
   }
 
@@ -3713,6 +3721,139 @@ TEST_F(DBTest, BlockBasedTablePrefixIndexTest) {
   Reopen(options);
   ASSERT_EQ("v1", Get("k1"));
   ASSERT_EQ("v2", Get("k2"));
+}
+
+TEST_F(DBTest, SetOptionsEffectiveInSuperVersions) {
+  // Basically, to test the SetOptions take effect with (and only with)
+  // new SuperVersions, and remain in effect through some things like
+  // flush and compaction, we use some queries that depend on the current
+  // prefix extractor.
+  //
+  // Making the semantics of read options dependent on the current state of
+  // mutable options is kind of an anti-pattern that prefix_seek_opt_in_only
+  // is helping to phase out. However, this is useful for rather directly
+  // testing the expected behavior of mutable options handling.
+  ReadOptions ropts;
+  ropts.prefix_same_as_start = true;
+  Options options = CurrentOptions();
+  options.prefix_extractor.reset(NewFixedPrefixTransform(5));
+  options.prefix_seek_opt_in_only = false;
+  Reopen(options);
+
+  ASSERT_OK(Put("goat1", "g1"));
+  ASSERT_OK(Put("goat2", "g2"));
+
+  std::unique_ptr<Iterator> iter(db_->NewIterator(ropts));
+
+  auto VerifyTransform4 = [&](int caller_line) {
+    SCOPED_TRACE("Called from " + std::to_string(caller_line));
+    // Nothing with this prefix
+    iter->Seek("game1");
+    ASSERT_OK(iter->status());
+    ASSERT_FALSE(iter->Valid());
+
+    iter->Seek("goat1");
+    ASSERT_OK(iter->status());
+    ASSERT_TRUE(iter->Valid());
+    ASSERT_EQ("goat1", iter->key());
+    iter->Next();
+    ASSERT_OK(iter->status());
+    ASSERT_TRUE(iter->Valid());
+    ASSERT_EQ("goat2", iter->key());
+  };
+
+  auto VerifyTransform5 = [&](int caller_line) {
+    SCOPED_TRACE("Called from " + std::to_string(caller_line));
+    // Nothing with this prefix
+    iter->Seek("game1");
+    ASSERT_OK(iter->status());
+    ASSERT_FALSE(iter->Valid());
+
+    iter->Seek("goat1");
+    ASSERT_OK(iter->status());
+    ASSERT_TRUE(iter->Valid());
+    ASSERT_EQ("goat1", iter->key());
+    iter->Next();
+    ASSERT_OK(iter->status());
+    ASSERT_FALSE(iter->Valid());
+
+    iter->Seek("goat2");
+    ASSERT_OK(iter->status());
+    ASSERT_TRUE(iter->Valid());
+    ASSERT_EQ("goat2", iter->key());
+    iter->Next();
+    ASSERT_OK(iter->status());
+    ASSERT_FALSE(iter->Valid());
+  };
+
+  for (int i = 0;; ++i) {
+    SCOPED_TRACE("Iteration " + std::to_string(i));
+    // Baseline
+    VerifyTransform5(__LINE__);
+
+    if (i == 0) {
+      // Test a "normal" change with nothing happening in parallel
+      ASSERT_OK(db_->SetOptions({{"prefix_extractor", "fixed:4"}}));
+
+      // Iterator still uses old superversion
+      VerifyTransform5(__LINE__);
+
+      // Refresh updates the SuperVersion
+      ASSERT_OK(iter->Refresh());
+    } else if (i == 1) {
+      // Test a setting change in parallel with flush
+      iter = nullptr;
+      SyncPoint::GetInstance()->DisableProcessing();
+      SyncPoint::GetInstance()->ClearAllCallBacks();
+      SyncPoint::GetInstance()->SetCallBack(
+          "FlushJob::WriteLevel0Table:num_memtables", [&](void*) {
+            // During flush, without DB mutex held
+            ASSERT_OK(db_->SetOptions({{"prefix_extractor", "fixed:4"}}));
+            iter.reset(db_->NewIterator(ropts));
+            VerifyTransform4(__LINE__);
+          });
+      SyncPoint::GetInstance()->EnableProcessing();
+      ASSERT_OK(Flush());
+      SyncPoint::GetInstance()->DisableProcessing();
+      SyncPoint::GetInstance()->ClearAllCallBacks();
+      // Callback was called
+      ASSERT_NE(iter, nullptr);
+    } else if (i == 2) {
+      // Test a setting change in parallel with compaction
+      iter = nullptr;
+      SyncPoint::GetInstance()->DisableProcessing();
+      SyncPoint::GetInstance()->ClearAllCallBacks();
+      SyncPoint::GetInstance()->SetCallBack(
+          "CompactionJob::Run():EndStatusSet", [&](void*) {
+            // During compaction, without DB mutex held
+            ASSERT_OK(db_->SetOptions({{"prefix_extractor", "fixed:4"}}));
+            iter.reset(db_->NewIterator(ropts));
+            VerifyTransform4(__LINE__);
+          });
+      SyncPoint::GetInstance()->EnableProcessing();
+      // Need data overlapping that L0 file to prevent trivial move
+      ASSERT_OK(Put("aaaaa", "a"));
+      ASSERT_OK(Put("zzzzz", "a"));
+      ASSERT_OK(CompactRange({}, {}, {}));
+      SyncPoint::GetInstance()->DisableProcessing();
+      SyncPoint::GetInstance()->ClearAllCallBacks();
+      // Callback was called
+      ASSERT_NE(iter, nullptr);
+    } else {
+      break;
+    }
+    // Change has taken effect
+    VerifyTransform4(__LINE__);
+    // Same after a new iterator (in case a new SuperVersion reverted the
+    // setting)
+    iter.reset(db_->NewIterator(ropts));
+    VerifyTransform4(__LINE__);
+
+    // Back to baseline setting
+    ASSERT_OK(db_->SetOptions({{"prefix_extractor", "fixed:5"}}));
+    // New iterator uses latest SuperVersion
+    iter.reset(db_->NewIterator(ropts));
+  }
 }
 
 TEST_F(DBTest, BlockBasedTablePrefixHashIndexTest) {
@@ -4377,7 +4518,6 @@ TEST_F(DBTest, ConcurrentMemtableNotSupported) {
   ColumnFamilyHandle* handle;
   ASSERT_NOK(db_->CreateColumnFamily(cf_options, "name", &handle));
 }
-
 
 TEST_F(DBTest, SanitizeNumThreads) {
   for (int attempt = 0; attempt < 2; attempt++) {
@@ -5161,7 +5301,6 @@ TEST_F(DBTest, DynamicLevelCompressionPerLevel) {
   for (int i = 0; i < kNKeys; i++) {
     keys[i] = i;
   }
-  RandomShuffle(std::begin(keys), std::end(keys));
 
   Random rnd(301);
   Options options;
@@ -5186,7 +5325,7 @@ TEST_F(DBTest, DynamicLevelCompressionPerLevel) {
   options.compression_per_level[0] = kNoCompression;
   // No compression for the Ln whre L0 is compacted to
   options.compression_per_level[1] = kNoCompression;
-  // Snpapy compression for Ln+1
+  // Snappy compression for Ln+1
   options.compression_per_level[2] = kSnappyCompression;
 
   OnFileDeletionListener* listener = new OnFileDeletionListener();
@@ -5198,6 +5337,7 @@ TEST_F(DBTest, DynamicLevelCompressionPerLevel) {
   // be compressed, so there shouldn't be any compression.
   for (int i = 0; i < 20; i++) {
     ASSERT_OK(Put(Key(keys[i]), CompressibleString(&rnd, 4000)));
+    ASSERT_OK(dbfull()->TEST_WaitForBackgroundWork());
   }
   ASSERT_OK(Flush());
   ASSERT_OK(dbfull()->TEST_WaitForCompact());
@@ -5216,8 +5356,9 @@ TEST_F(DBTest, DynamicLevelCompressionPerLevel) {
   // above compression settings for each level, there will be some compression.
   ASSERT_OK(options.statistics->Reset());
   ASSERT_EQ(num_block_compressed, 0);
-  for (int i = 21; i < 120; i++) {
+  for (int i = 20; i < 120; i++) {
     ASSERT_OK(Put(Key(keys[i]), CompressibleString(&rnd, 4000)));
+    ASSERT_OK(dbfull()->TEST_WaitForBackgroundWork());
   }
   ASSERT_OK(Flush());
   ASSERT_OK(dbfull()->TEST_WaitForCompact());
@@ -5238,9 +5379,44 @@ TEST_F(DBTest, DynamicLevelCompressionPerLevel) {
   }));
   ColumnFamilyMetaData cf_meta;
   db_->GetColumnFamilyMetaData(&cf_meta);
+
+  // Ensure that L1+ files are non-overlapping and together with L0 encompass
+  // full key range between smallestkey and largestkey from CF file metadata.
+  int largestkey_in_prev_level = -1;
+  int keys_found = 0;
+  for (int level = (int)cf_meta.levels.size() - 1; level >= 0; level--) {
+    int files_in_level = (int)cf_meta.levels[level].files.size();
+    int largestkey_in_prev_file = -1;
+    for (int j = 0; j < files_in_level; j++) {
+      int smallestkey = IdFromKey(cf_meta.levels[level].files[j].smallestkey);
+      int largestkey = IdFromKey(cf_meta.levels[level].files[j].largestkey);
+      int num_entries = (int)cf_meta.levels[level].files[j].num_entries;
+      ASSERT_EQ(num_entries, largestkey - smallestkey + 1);
+      keys_found += num_entries;
+      if (level > 0) {
+        if (j == 0) {
+          ASSERT_GT(smallestkey, largestkey_in_prev_level);
+        }
+        if (j > 0) {
+          ASSERT_GT(smallestkey, largestkey_in_prev_file);
+        }
+        if (j == files_in_level - 1) {
+          largestkey_in_prev_level = largestkey;
+        }
+      }
+      largestkey_in_prev_file = largestkey;
+    }
+  }
+  ASSERT_EQ(keys_found, kNKeys);
+
   for (const auto& file : cf_meta.levels[4].files) {
     listener->SetExpectedFileName(dbname_ + file.name);
-    ASSERT_OK(dbfull()->DeleteFile(file.name));
+    const RangeOpt ranges(file.smallestkey, file.largestkey);
+    // Given verification from above, we're guaranteed that by deleting all the
+    // files in [<smallestkey>, <largestkey>] range, we're effectively deleting
+    // that very single file and nothing more.
+    EXPECT_OK(dbfull()->DeleteFilesInRanges(dbfull()->DefaultColumnFamily(),
+                                            &ranges, true /* include_end */));
   }
   listener->VerifyMatchedCount(cf_meta.levels[4].files.size());
 
@@ -5287,6 +5463,7 @@ TEST_F(DBTest, DynamicLevelCompressionPerLevel2) {
   options.max_bytes_for_level_multiplier = 8;
   options.max_background_compactions = 1;
   options.num_levels = 5;
+  options.compaction_verify_record_count = false;
   std::shared_ptr<mock::MockTableFactory> mtf(new mock::MockTableFactory);
   options.table_factory = mtf;
 
@@ -5788,7 +5965,6 @@ TEST_F(DBTest, FileCreationRandomFailure) {
   }
 }
 
-
 TEST_F(DBTest, DynamicMiscOptions) {
   // Test max_sequential_skip_in_iterations
   Options options;
@@ -5919,6 +6095,11 @@ TEST_F(DBTest, L0L1L2AndUpHitCounter) {
 }
 
 TEST_F(DBTest, EncodeDecompressedBlockSizeTest) {
+  bool& allow_unsupported_fv =
+      BlockBasedTableFactory::AllowUnsupportedFormatVersion();
+  SaveAndRestore guard(&allow_unsupported_fv);
+  ASSERT_FALSE(allow_unsupported_fv);
+
   // iter 0 -- zlib
   // iter 1 -- bzip2
   // iter 2 -- lz4
@@ -5941,7 +6122,16 @@ TEST_F(DBTest, EncodeDecompressedBlockSizeTest) {
       table_options.format_version = first_table_version;
       table_options.filter_policy.reset(NewBloomFilterPolicy(10));
       Options options = CurrentOptions();
+
+      // Hack to generate old files (checked in factory construction)
+      allow_unsupported_fv = true;
       options.table_factory.reset(NewBlockBasedTableFactory(table_options));
+      ASSERT_EQ(options.table_factory->GetOptions<BlockBasedTableOptions>()
+                    ->format_version,
+                first_table_version);
+      // Able to read old files without the hack
+      allow_unsupported_fv = false;
+
       options.create_if_missing = true;
       options.compression = comp;
       DestroyAndReopen(options);
@@ -5953,9 +6143,14 @@ TEST_F(DBTest, EncodeDecompressedBlockSizeTest) {
         // compressible string
         ASSERT_OK(Put(Key(i), rnd.RandomString(128) + std::string(128, 'a')));
       }
+      ASSERT_OK(Flush());
 
       table_options.format_version = first_table_version == 1 ? 2 : 1;
       options.table_factory.reset(NewBlockBasedTableFactory(table_options));
+      // format_version (for writing) is sanitized to minimum supported
+      ASSERT_EQ(options.table_factory->GetOptions<BlockBasedTableOptions>()
+                    ->format_version,
+                BlockBasedTableFactory::kMinSupportedFormatVersion);
       Reopen(options);
       for (int i = 0; i < kNumKeysWritten; ++i) {
         auto r = Get(Key(i));
@@ -6224,7 +6419,7 @@ TEST_F(DBTest, TestLogCleanup) {
 
   for (int i = 0; i < 100000; ++i) {
     ASSERT_OK(Put(Key(i), "val"));
-    // only 2 memtables will be alive, so logs_to_free needs to always be below
+    // only 2 memtables will be alive, so wals_to_free needs to always be below
     // 2
     ASSERT_LT(dbfull()->TEST_LogsToFreeSize(), static_cast<size_t>(3));
   }
@@ -7230,7 +7425,6 @@ TEST_F(DBTest, ReusePinnableSlice) {
             1);
 }
 
-
 TEST_F(DBTest, DeletingOldWalAfterDrop) {
   ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->LoadDependency(
       {{"Test:AllowFlushes", "DBImpl::BGWorkFlush"},
@@ -7354,7 +7548,6 @@ TEST_F(DBTest, LargeBlockSizeTest) {
   options.table_factory.reset(NewBlockBasedTableFactory(table_options));
   ASSERT_NOK(TryReopenWithColumnFamilies({"default", "pikachu"}, options));
 }
-
 
 TEST_F(DBTest, CreationTimeOfOldestFile) {
   const int kNumKeysPerFile = 32;

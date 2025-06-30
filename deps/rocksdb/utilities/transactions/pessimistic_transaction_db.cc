@@ -20,6 +20,7 @@
 #include "test_util/sync_point.h"
 #include "util/cast_util.h"
 #include "util/mutexlock.h"
+#include "utilities/secondary_index/secondary_index_mixin.h"
 #include "utilities/transactions/pessimistic_transaction.h"
 #include "utilities/transactions/transaction_db_mutex_impl.h"
 #include "utilities/transactions/write_prepared_txn_db.h"
@@ -183,7 +184,12 @@ Transaction* WriteCommittedTxnDB::BeginTransaction(
     ReinitializeTransaction(old_txn, write_options, txn_options);
     return old_txn;
   } else {
-    return new WriteCommittedTxn(this, write_options, txn_options);
+    if (!txn_db_options_.secondary_indices.empty()) {
+      return new SecondaryIndexMixin<WriteCommittedTxn>(
+          &txn_db_options_.secondary_indices, this, write_options, txn_options);
+    } else {
+      return new WriteCommittedTxn(this, write_options, txn_options);
+    }
   }
 }
 
@@ -224,7 +230,7 @@ Status TransactionDB::Open(
     const std::vector<ColumnFamilyDescriptor>& column_families,
     std::vector<ColumnFamilyHandle*>* handles, TransactionDB** dbptr) {
   Status s;
-  DB* db = nullptr;
+  std::unique_ptr<DB> db;
   if (txn_db_options.write_policy == WRITE_COMMITTED &&
       db_options.unordered_write) {
     return Status::NotSupported(
@@ -263,8 +269,8 @@ Status TransactionDB::Open(
                    static_cast<int>(txn_db_options.write_policy));
     // if WrapDB return non-ok, db will be deleted in WrapDB() via
     // ~StackableDB().
-    s = WrapDB(db, txn_db_options, compaction_enabled_cf_indices, *handles,
-               dbptr);
+    s = WrapDB(db.release(), txn_db_options, compaction_enabled_cf_indices,
+               *handles, dbptr);
   }
   return s;
 }
@@ -278,8 +284,7 @@ void TransactionDB::PrepareWrap(
   for (size_t i = 0; i < column_families->size(); i++) {
     ColumnFamilyOptions* cf_options = &(*column_families)[i].options;
 
-    if (cf_options->max_write_buffer_size_to_maintain == 0 &&
-        cf_options->max_write_buffer_number_to_maintain == 0) {
+    if (cf_options->max_write_buffer_size_to_maintain == 0) {
       // Setting to -1 will set the History size to
       // max_write_buffer_number * write_buffer_size.
       cf_options->max_write_buffer_size_to_maintain = -1;

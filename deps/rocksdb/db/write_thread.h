@@ -132,7 +132,7 @@ class WriteThread {
     size_t protection_bytes_per_key;
     PreReleaseCallback* pre_release_callback;
     PostMemTableCallback* post_memtable_callback;
-    uint64_t log_used;  // log number that this batch was inserted into
+    uint64_t wal_used;  // log number that this batch was inserted into
     uint64_t log_ref;   // log number that memtable insert should reference
     WriteCallback* callback;
     UserWriteCallback* user_write_cb;
@@ -148,6 +148,8 @@ class WriteThread {
     Writer* link_older;  // read/write only before linking, or as leader
     Writer* link_newer;  // lazy, read/write only before linking, or as leader
 
+    bool ingest_wbwi;
+
     Writer()
         : batch(nullptr),
           sync(false),
@@ -159,7 +161,7 @@ class WriteThread {
           protection_bytes_per_key(0),
           pre_release_callback(nullptr),
           post_memtable_callback(nullptr),
-          log_used(0),
+          wal_used(0),
           log_ref(0),
           callback(nullptr),
           user_write_cb(nullptr),
@@ -174,7 +176,8 @@ class WriteThread {
            WriteCallback* _callback, UserWriteCallback* _user_write_cb,
            uint64_t _log_ref, bool _disable_memtable, size_t _batch_cnt = 0,
            PreReleaseCallback* _pre_release_callback = nullptr,
-           PostMemTableCallback* _post_memtable_callback = nullptr)
+           PostMemTableCallback* _post_memtable_callback = nullptr,
+           bool _ingest_wbwi = false)
         : batch(_batch),
           // TODO: store a copy of WriteOptions instead of its seperated data
           // members
@@ -187,7 +190,7 @@ class WriteThread {
           protection_bytes_per_key(_batch->GetProtectionBytesPerKey()),
           pre_release_callback(_pre_release_callback),
           post_memtable_callback(_post_memtable_callback),
-          log_used(0),
+          wal_used(0),
           log_ref(_log_ref),
           callback(_callback),
           user_write_cb(_user_write_cb),
@@ -196,7 +199,8 @@ class WriteThread {
           write_group(nullptr),
           sequence(kMaxSequenceNumber),
           link_older(nullptr),
-          link_newer(nullptr) {}
+          link_newer(nullptr),
+          ingest_wbwi(_ingest_wbwi) {}
 
     ~Writer() {
       if (made_waitable) {

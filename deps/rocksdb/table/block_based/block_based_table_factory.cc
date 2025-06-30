@@ -164,7 +164,6 @@ size_t TailPrefetchStats::GetSuggestedPrefetchSize() {
   return std::min(kMaxPrefetchSize, max_qualified_size);
 }
 
-
 const std::string kOptNameMetadataCacheOpts = "metadata_cache_options";
 
 static std::unordered_map<std::string, PinningTier>
@@ -468,6 +467,20 @@ void BlockBasedTableFactory::InitializeOptions() {
       options_overrides_iter->second.charged = options.charged;
     }
   }
+
+  if (table_options_.format_version < kMinSupportedFormatVersion) {
+    if (AllowUnsupportedFormatVersion()) {
+      // Allow old format version for testing.
+      // And relevant old sanitization.
+      if (table_options_.format_version == 0 &&
+          table_options_.checksum != kCRC32c) {
+        // silently convert format_version to 1 to support non-CRC32c checksum
+        table_options_.format_version = 1;
+      }
+    } else {
+      table_options_.format_version = kMinSupportedFormatVersion;
+    }
+  }
 }
 
 Status BlockBasedTableFactory::PrepareOptions(const ConfigOptions& opts) {
@@ -479,8 +492,8 @@ namespace {
 // Different cache kinds use the same keys for physically different values, so
 // they must not share an underlying key space with each other.
 Status CheckCacheOptionCompatibility(const BlockBasedTableOptions& bbto) {
-  int cache_count = (bbto.block_cache != nullptr) +
-                    (bbto.persistent_cache != nullptr);
+  int cache_count =
+      (bbto.block_cache != nullptr) + (bbto.persistent_cache != nullptr);
   if (cache_count <= 1) {
     // Nothing to share / overlap
     return Status::OK();
@@ -909,6 +922,11 @@ Status BlockBasedTableFactory::ParseOption(const ConfigOptions& config_options,
     }
   }
   return status;
+}
+
+bool& BlockBasedTableFactory::AllowUnsupportedFormatVersion() {
+  static bool allow = false;
+  return allow;
 }
 
 Status GetBlockBasedTableOptionsFromString(

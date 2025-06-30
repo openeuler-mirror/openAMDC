@@ -64,6 +64,9 @@ enum CompactionPri : char {
 struct FileTemperatureAge {
   Temperature temperature = Temperature::kUnknown;
   uint64_t age = 0;
+#if __cplusplus >= 202002L
+  bool operator==(const FileTemperatureAge& rhs) const = default;
+#endif
 };
 
 struct CompactionOptionsFIFO {
@@ -116,6 +119,10 @@ struct CompactionOptionsFIFO {
   CompactionOptionsFIFO(uint64_t _max_table_files_size, bool _allow_compaction)
       : max_table_files_size(_max_table_files_size),
         allow_compaction(_allow_compaction) {}
+
+#if __cplusplus >= 202002L
+  bool operator==(const CompactionOptionsFIFO& rhs) const = default;
+#endif
 };
 
 // The control option of how the cache tiers will be used. Currently rocksdb
@@ -163,15 +170,6 @@ struct AdvancedColumnFamilyOptions {
   // option will be sanitized to 1.
   // Default: 1
   int min_write_buffer_number_to_merge = 1;
-
-  // DEPRECATED
-  // The total maximum number of write buffers to maintain in memory including
-  // copies of buffers that have already been flushed.  Unlike
-  // max_write_buffer_number, this parameter does not affect flushing.
-  // This parameter is being replaced by max_write_buffer_size_to_maintain.
-  // If both parameters are set to non-zero values, this parameter will be
-  // ignored.
-  int max_write_buffer_number_to_maintain = 0;
 
   // The target number of write history bytes to hold in memory. Write history
   // comprises the latest write buffers (memtables). To reach the target, write
@@ -712,6 +710,17 @@ struct AdvancedColumnFamilyOptions {
   // Dynamically changeable through SetOptions() API
   bool report_bg_io_stats = false;
 
+  // Setting this option to true disallows ordinary writes to the column family
+  // and it can only be populated through import and ingestion. It is intended
+  // to protect "ingestion only" column families. This option is not currently
+  // supported on the default column family because of error handling challenges
+  // analogous to https://github.com/facebook/rocksdb/issues/13429
+  //
+  // This option is not mutable with SetOptions(). It can be changed between
+  // DB::Open() calls, but open will fail if recovering WAL writes to a CF with
+  // this option set.
+  bool disallow_memtable_writes = false;
+
   // This option has different meanings for different compaction styles:
   //
   // Leveled: Non-bottom-level files with all keys older than TTL will go
@@ -1086,6 +1095,20 @@ struct AdvancedColumnFamilyOptions {
   // reads. Enabling this feature incurs a performance overhead due to an
   // additional key comparison during memtable lookup.
   bool paranoid_memory_checks = false;
+
+  // When an iterator scans this number of invisible entries (tombstones or
+  // hidden puts) from the active memtable during a single iterator operation,
+  // we will attempt to flush the memtable. Currently only forward scans are
+  // supported (SeekToFirst(), Seek() and Next()).
+  // This option helps to reduce the overhead of scanning through a
+  // large number of entries in memtable.
+  // Users should consider enable deletion-triggered-compaction (see
+  // CompactOnDeletionCollectorFactory) together with this option to compact
+  // away tombstones after the memtable is flushed.
+  //
+  // Default: 0 (disabled)
+  // Dynamically changeable through the SetOptions() API.
+  uint32_t memtable_op_scan_flush_trigger = 0;
 
   // Create ColumnFamilyOptions with default values for all fields
   AdvancedColumnFamilyOptions();

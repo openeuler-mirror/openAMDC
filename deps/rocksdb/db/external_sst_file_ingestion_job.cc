@@ -29,6 +29,7 @@ Status ExternalSstFileIngestionJob::Prepare(
     const std::vector<std::string>& external_files_paths,
     const std::vector<std::string>& files_checksums,
     const std::vector<std::string>& files_checksum_func_names,
+    const std::optional<RangeOpt>& atomic_replace_range,
     const Temperature& file_temperature, uint64_t next_file_number,
     SuperVersion* sv) {
   Status status;
@@ -80,12 +81,44 @@ Status ExternalSstFileIngestionJob::Prepare(
     std::sort(sorted_files.begin(), sorted_files.end(), file_range_checker_);
 
     for (size_t i = 0; i + 1 < num_files; i++) {
-      if (file_range_checker_.OverlapsWithPrev(sorted_files[i],
-                                               sorted_files[i + 1],
-                                               /* ranges_sorted= */ true)) {
+      if (file_range_checker_.Overlaps(*sorted_files[i], *sorted_files[i + 1],
+                                       /* known_sorted= */ true)) {
         files_overlap_ = true;
         break;
       }
+    }
+  }
+
+  if (atomic_replace_range.has_value()) {
+    atomic_replace_range_.emplace();
+
+    if (atomic_replace_range->start && atomic_replace_range->limit) {
+      // User keys to internal keys (with timestamps)
+      const size_t ts_sz = ucmp_->timestamp_size();
+      std::string start_with_ts, limit_with_ts;
+      auto [start, limit] = MaybeAddTimestampsToRange(
+          atomic_replace_range->start, atomic_replace_range->limit, ts_sz,
+          &start_with_ts, &limit_with_ts);
+      assert(start.has_value());
+      assert(limit.has_value());
+      atomic_replace_range_->smallest_internal_key.Set(
+          *start, kMaxSequenceNumber, kValueTypeForSeek);
+      atomic_replace_range_->largest_internal_key.Set(
+          *limit, kMaxSequenceNumber, kValueTypeForSeek);
+      // Check files to ingest against replace range
+      for (size_t i = 0; i < num_files; i++) {
+        if (!file_range_checker_.Contains(*atomic_replace_range_,
+                                          files_to_ingest_[i])) {
+          return Status::InvalidArgument(
+              "Atomic replace range does not contain all files");
+        }
+      }
+    } else {
+      // Currently if either bound is not present, both must be
+      assert(atomic_replace_range->start.has_value() == false);
+      assert(atomic_replace_range->limit.has_value() == false);
+      assert(atomic_replace_range_->smallest_internal_key.unset());
+      assert(atomic_replace_range_->largest_internal_key.unset());
     }
   }
 
@@ -93,6 +126,14 @@ Status ExternalSstFileIngestionJob::Prepare(
     return Status::NotSupported(
         "Files with overlapping ranges cannot be ingested with ingestion "
         "behind mode.");
+  }
+
+  // Overlapping files need at least two different sequence numbers. If settings
+  // disables global seqno, ingestion will fail anyway, so fail fast in prepare.
+  if (!ingestion_options_.allow_global_seqno && files_overlap_) {
+    return Status::InvalidArgument(
+        "Global seqno is required, but disabled (because external files key "
+        "range overlaps).");
   }
 
   if (ucmp_->timestamp_size() > 0 && files_overlap_) {
@@ -107,7 +148,7 @@ Status ExternalSstFileIngestionJob::Prepare(
     f.copy_file = false;
     const std::string path_outside_db = f.external_file_path;
     const std::string path_inside_db = TableFileName(
-        cfd_->ioptions()->cf_paths, f.fd.GetNumber(), f.fd.GetPathId());
+        cfd_->ioptions().cf_paths, f.fd.GetNumber(), f.fd.GetPathId());
     if (ingestion_options_.move_files || ingestion_options_.link_files) {
       status =
           fs_->LinkFile(path_outside_db, path_inside_db, IOOptions(), nullptr);
@@ -351,9 +392,9 @@ void ExternalSstFileIngestionJob::DivideInputFilesIntoBatches() {
 
   file_batches_to_ingest_.emplace_back(/* _track_batch_range= */ true);
   for (auto& file : files_to_ingest_) {
-    if (file_range_checker_.OverlapsWithPrev(&file_batches_to_ingest_.back(),
-                                             &file,
-                                             /* ranges_sorted= */ false)) {
+    if (!file_batches_to_ingest_.back().unset() &&
+        file_range_checker_.Overlaps(file_batches_to_ingest_.back(), file,
+                                     /* known_sorted= */ false)) {
       file_batches_to_ingest_.emplace_back(/* _track_batch_range= */ true);
     }
     file_batches_to_ingest_.back().AddFile(&file, file_range_checker_);
@@ -362,14 +403,32 @@ void ExternalSstFileIngestionJob::DivideInputFilesIntoBatches() {
 
 Status ExternalSstFileIngestionJob::NeedsFlush(bool* flush_needed,
                                                SuperVersion* super_version) {
-  size_t n = files_to_ingest_.size();
-  autovector<UserKeyRange> ranges;
-  ranges.reserve(n);
-  for (const IngestedFileInfo& file_to_ingest : files_to_ingest_) {
-    ranges.emplace_back(file_to_ingest.start_ukey, file_to_ingest.limit_ukey);
+  Status status;
+  if (atomic_replace_range_.has_value() && atomic_replace_range_->unset()) {
+    // For replacing whole CF, we can simply check whether memtable is empty
+    *flush_needed = !super_version->mem->IsEmpty();
+  } else {
+    autovector<UserKeyRange> ranges;
+    if (atomic_replace_range_.has_value()) {
+      assert(!atomic_replace_range_->smallest_internal_key.unset());
+      assert(!atomic_replace_range_->largest_internal_key.unset());
+      // NOTE: we already checked in Prepare() that the atomic_replace_range
+      // covers all the files_to_ingest
+      // FIXME: need to make upper bound key exclusive (not easy here because
+      // the existing internal APIs deal in inclusive upper bound user keys)
+      ranges.emplace_back(
+          atomic_replace_range_->smallest_internal_key.user_key(),
+          atomic_replace_range_->largest_internal_key.user_key());
+    } else {
+      ranges.reserve(files_to_ingest_.size());
+      for (const IngestedFileInfo& file_to_ingest : files_to_ingest_) {
+        ranges.emplace_back(file_to_ingest.start_ukey,
+                            file_to_ingest.limit_ukey);
+      }
+    }
+    status = cfd_->RangesOverlapWithMemtables(
+        ranges, super_version, db_options_.allow_data_in_errors, flush_needed);
   }
-  Status status = cfd_->RangesOverlapWithMemtables(
-      ranges, super_version, db_options_.allow_data_in_errors, flush_needed);
   if (status.ok() && *flush_needed) {
     if (!ingestion_options_.allow_blocking_flush) {
       status = Status::InvalidArgument("External file requires flush");
@@ -387,8 +446,16 @@ Status ExternalSstFileIngestionJob::NeedsFlush(bool* flush_needed,
 // REQUIRES: we have become the only writer by entering both write_thread_ and
 // nonmem_write_thread_
 Status ExternalSstFileIngestionJob::Run() {
-  Status status;
   SuperVersion* super_version = cfd_->GetSuperVersion();
+  // If column family is flushed after Prepare and before Run, we should have a
+  // specific state of Memtables. The mutable Memtable should be empty, and the
+  // immutable Memtable list should be empty.
+  if (flushed_before_run_ && (super_version->imm->NumNotFlushed() != 0 ||
+                              !super_version->mem->IsEmpty())) {
+    return Status::TryAgain(
+        "Inconsistent memtable state detected when flushed before run.");
+  }
+  Status status;
 #ifndef NDEBUG
   // We should never run the job with a memtable that is overlapping
   // with the files we are ingesting
@@ -414,8 +481,49 @@ Status ExternalSstFileIngestionJob::Run() {
   // the only active writer, and hence they are equal
   SequenceNumber last_seqno = versions_->LastSequence();
   edit_.SetColumnFamily(cfd_->GetID());
-  // The levels that the files will be ingested into
 
+  if (atomic_replace_range_.has_value()) {
+    auto* vstorage = super_version->current->storage_info();
+    if (atomic_replace_range_->unset()) {
+      if (cfd_->compaction_picker()->IsCompactionInProgress()) {
+        return Status::InvalidArgument(
+            "Atomic replace range (full) overlaps with pending compaction");
+      }
+      for (int lvl = 0; lvl < cfd_->NumberLevels(); lvl++) {
+        for (auto file : vstorage->LevelFiles(lvl)) {
+          // Set up to delete file to be replaced
+          edit_.DeleteFile(lvl, file->fd.GetNumber());
+        }
+      }
+    } else {
+      assert(!atomic_replace_range_->smallest_internal_key.unset());
+      assert(!atomic_replace_range_->largest_internal_key.unset());
+      for (int lvl = 0; lvl < cfd_->NumberLevels(); lvl++) {
+        if (cfd_->RangeOverlapWithCompaction(
+                atomic_replace_range_->smallest_internal_key.user_key(),
+                atomic_replace_range_->largest_internal_key.user_key(), lvl)) {
+          return Status::InvalidArgument(
+              "Atomic replace range overlaps with pending compaction");
+        }
+        for (auto file : vstorage->LevelFiles(lvl)) {
+          if (file_range_checker_.Overlaps(*atomic_replace_range_,
+                                           file->smallest, file->largest)) {
+            if (file_range_checker_.Contains(*atomic_replace_range_,
+                                             file->smallest, file->largest)) {
+              // Set up to delete file to be replaced
+              edit_.DeleteFile(lvl, file->fd.GetNumber());
+            } else {
+              // TODO: generate and ingest a tombstone file also
+              return Status::InvalidArgument(
+                  "Atomic replace range partially overlaps with existing file");
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Find levels to ingest into
   std::optional<int> prev_batch_uppermost_level;
   for (auto& batch : file_batches_to_ingest_) {
     int batch_uppermost_level = 0;
@@ -447,7 +555,7 @@ Status ExternalSstFileIngestionJob::AssignLevelsForOneBatch(
       status = CheckLevelForIngestedBehindFile(file);
     } else {
       status = AssignLevelAndSeqnoForIngestedFile(
-          super_version, force_global_seqno, cfd_->ioptions()->compaction_style,
+          super_version, force_global_seqno, cfd_->ioptions().compaction_style,
           *last_seqno, file, &assigned_seqno, prev_batch_uppermost_level);
     }
 
@@ -502,16 +610,8 @@ Status ExternalSstFileIngestionJob::AssignLevelsForOneBatch(
       current_time = oldest_ancester_time =
           static_cast<uint64_t>(temp_current_time);
     }
-    uint64_t tail_size = 0;
-    bool contain_no_data_blocks = file->table_properties.num_entries > 0 &&
-                                  (file->table_properties.num_entries ==
-                                   file->table_properties.num_range_deletions);
-    if (file->table_properties.tail_start_offset > 0 ||
-        contain_no_data_blocks) {
-      uint64_t file_size = file->fd.GetFileSize();
-      assert(file->table_properties.tail_start_offset <= file_size);
-      tail_size = file_size - file->table_properties.tail_start_offset;
-    }
+    uint64_t tail_size = FileMetaData::CalculateTailSize(
+        file->fd.GetFileSize(), file->table_properties);
 
     bool marked_for_compaction =
         file->table_properties.num_range_deletions == 1 &&
@@ -568,13 +668,13 @@ void ExternalSstFileIngestionJob::CreateEquivalentFileIngestingCompactions() {
     int output_level = pair.first;
     const CompactionInputFiles& input = pair.second;
 
-    const auto& mutable_cf_options = *(cfd_->GetLatestMutableCFOptions());
+    const auto& mutable_cf_options = cfd_->GetLatestMutableCFOptions();
     file_ingesting_compactions_.push_back(new Compaction(
-        cfd_->current()->storage_info(), *cfd_->ioptions(), mutable_cf_options,
+        cfd_->current()->storage_info(), cfd_->ioptions(), mutable_cf_options,
         mutable_db_options_, {input}, output_level,
         /* output file size limit not applicable */
         MaxFileSizeForLevel(mutable_cf_options, output_level,
-                            cfd_->ioptions()->compaction_style),
+                            cfd_->ioptions().compaction_style),
         LLONG_MAX /* max compaction bytes, not applicable */,
         0 /* output path ID, not applicable */, mutable_cf_options.compression,
         mutable_cf_options.compression_opts,
@@ -615,8 +715,7 @@ void ExternalSstFileIngestionJob::UpdateStats() {
   uint64_t total_time = clock_->NowMicros() - job_start_time_;
 
   EventLoggerStream stream = event_logger_->Log();
-  stream << "event"
-         << "ingest_finished";
+  stream << "event" << "ingest_finished";
   stream << "files_ingested";
   stream.StartArray();
 
@@ -734,7 +833,7 @@ Status ExternalSstFileIngestionJob::ResetTableReader(
   status = sv->mutable_cf_options.table_factory->NewTableReader(
       ro,
       TableReaderOptions(
-          *cfd_->ioptions(), sv->mutable_cf_options.prefix_extractor,
+          cfd_->ioptions(), sv->mutable_cf_options.prefix_extractor,
           env_options_, cfd_->internal_comparator(),
           sv->mutable_cf_options.block_protection_bytes_per_key,
           /*skip_filters*/ false, /*immortal*/ false,
@@ -828,7 +927,7 @@ Status ExternalSstFileIngestionJob::SanityCheckTableProperties(
   bool mark_sst_file_has_no_udt = false;
   Status s = ValidateUserDefinedTimestampsOptions(
       cfd_->user_comparator(), props->comparator_name,
-      cfd_->ioptions()->persist_user_defined_timestamps,
+      cfd_->ioptions().persist_user_defined_timestamps,
       file_to_ingest->user_defined_timestamps_persisted,
       &mark_sst_file_has_no_udt);
   if (s.ok() && mark_sst_file_has_no_udt) {
@@ -1089,6 +1188,10 @@ Status ExternalSstFileIngestionJob::AssignLevelAndSeqnoForIngestedFile(
     if (lvl > 0 && lvl < vstorage->base_level()) {
       continue;
     }
+    if (atomic_replace_range_.has_value()) {
+      target_level = lvl;
+      continue;
+    }
     if (cfd_->RangeOverlapWithCompaction(file_to_ingest->start_ukey,
                                          file_to_ingest->limit_ukey, lvl)) {
       // We must use L0 or any level higher than `lvl` to be able to overwrite
@@ -1157,6 +1260,8 @@ Status ExternalSstFileIngestionJob::AssignLevelAndSeqnoForIngestedFile(
 
 Status ExternalSstFileIngestionJob::CheckLevelForIngestedBehindFile(
     IngestedFileInfo* file_to_ingest) {
+  assert(!atomic_replace_range_.has_value());
+
   auto* vstorage = cfd_->current()->storage_info();
   // First, check if new files fit in the last level
   int last_lvl = cfd_->NumberLevels() - 1;

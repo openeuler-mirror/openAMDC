@@ -73,6 +73,8 @@ class CompactionPicker {
   // compaction_end will be set to nullptr.
   // Client is responsible for compaction_end storage -- when called,
   // *compaction_end should point to valid InternalKey!
+  // REQUIRES: If not compacting all levels (input_level == kCompactAllLevels),
+  // then levels between input_level and output_level should be empty.
   virtual Compaction* CompactRange(
       const std::string& cf_name, const MutableCFOptions& mutable_cf_options,
       const MutableDBOptions& mutable_db_options, VersionStorageInfo* vstorage,
@@ -97,9 +99,8 @@ class CompactionPicker {
   // non-ok status with specific reason.
   //
   Status SanitizeAndConvertCompactionInputFiles(
-      std::unordered_set<uint64_t>* input_files,
-      const ColumnFamilyMetaData& cf_meta, const int output_level,
-      const VersionStorageInfo* vstorage,
+      std::unordered_set<uint64_t>* input_files, const int output_level,
+      Version* version,
       std::vector<CompactionInputFiles>* converted_input_files) const;
 
   // Free up the files that participated in a compaction
@@ -135,6 +136,12 @@ class CompactionPicker {
   // Is there currently a compaction involving level 0 taking place
   bool IsLevel0CompactionInProgress() const {
     return !level0_compactions_in_progress_.empty();
+  }
+
+  // Is any compaction in progress
+  bool IsCompactionInProgress() const {
+    return !(level0_compactions_in_progress_.empty() &&
+             compactions_in_progress_.empty());
   }
 
   // Return true if the passed key range overlap with a compaction output
@@ -189,7 +196,7 @@ class CompactionPicker {
   // key range of a currently running compaction.
   bool FilesRangeOverlapWithCompaction(
       const std::vector<CompactionInputFiles>& inputs, int level,
-      int penultimate_level) const;
+      int proximal_level) const;
 
   bool SetupOtherInputs(const std::string& cf_name,
                         const MutableCFOptions& mutable_cf_options,

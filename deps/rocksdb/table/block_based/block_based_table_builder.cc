@@ -29,6 +29,7 @@
 #include "index_builder.h"
 #include "logging/logging.h"
 #include "memory/memory_allocator_impl.h"
+#include "options/options_helper.h"
 #include "rocksdb/cache.h"
 #include "rocksdb/comparator.h"
 #include "rocksdb/env.h"
@@ -500,8 +501,7 @@ struct BlockBasedTableBuilder::Rep {
             table_options.flush_block_policy_factory->NewFlushBlockPolicy(
                 table_options, data_block)),
         create_context(&table_options, &ioptions, ioptions.stats,
-                       compression_type == kZSTD ||
-                           compression_type == kZSTDNotFinalCompression,
+                       compression_type == kZSTD,
                        tbo.moptions.block_protection_bytes_per_key,
                        tbo.internal_comparator.user_comparator(),
                        !use_delta_encoding_for_index_values,
@@ -619,6 +619,7 @@ struct BlockBasedTableBuilder::Rep {
     props.column_family_id = tbo.column_family_id;
     props.column_family_name = tbo.column_family_name;
     props.oldest_key_time = tbo.oldest_key_time;
+    props.newest_key_time = tbo.newest_key_time;
     props.file_creation_time = tbo.file_creation_time;
     props.orig_file_number = tbo.cur_file_num;
     props.db_id = tbo.db_id;
@@ -979,16 +980,6 @@ BlockBasedTableBuilder::BlockBasedTableBuilder(
     const BlockBasedTableOptions& table_options, const TableBuilderOptions& tbo,
     WritableFileWriter* file) {
   BlockBasedTableOptions sanitized_table_options(table_options);
-  if (sanitized_table_options.format_version == 0 &&
-      sanitized_table_options.checksum != kCRC32c) {
-    ROCKS_LOG_WARN(
-        tbo.ioptions.logger,
-        "Silently converting format_version to 1 because checksum is "
-        "non-default");
-    // silently convert format_version to 1 to keep consistent with current
-    // behavior
-    sanitized_table_options.format_version = 1;
-  }
   auto ucmp = tbo.internal_comparator.user_comparator();
   assert(ucmp);
   (void)ucmp;  // avoids unused variable error.
@@ -1026,6 +1017,11 @@ void BlockBasedTableBuilder::Add(const Slice& ikey, const Slice& value) {
 #ifndef NDEBUG
     if (r->props.num_entries > r->props.num_range_deletions) {
       assert(r->internal_comparator.Compare(ikey, Slice(r->last_ikey)) > 0);
+    }
+    bool skip = false;
+    TEST_SYNC_POINT_CALLBACK("BlockBasedTableBuilder::Add::skip", (void*)&skip);
+    if (skip) {
+      return;
     }
 #endif  // !NDEBUG
 
@@ -1246,6 +1242,20 @@ void BlockBasedTableBuilder::CompressAndVerifyBlock(
         r->ioptions.clock,
         ShouldReportDetailedTime(r->ioptions.env, r->ioptions.stats));
 
+    *type = r->compression_type;
+#ifndef NDEBUG
+    if (r->compression_type != kNoCompression &&
+        g_hack_mixed_compression_in_block_based_table.LoadRelaxed() > 0U) {
+      // If zstd is in the mix, the compression_name table property needs to be
+      // set to it, for proper handling of context and dictionaries.
+      assert(!ZSTD_Supported() || r->compression_type == kZSTD);
+      const auto& compressions = GetSupportedCompressions();
+      auto counter =
+          g_hack_mixed_compression_in_block_based_table.FetchAddRelaxed(1);
+      *type = compressions[counter % compressions.size()];
+    }
+#endif  // !NDEBUG
+
     if (is_data_block) {
       r->compressible_input_data_bytes.fetch_add(uncompressed_block_data.size(),
                                                  std::memory_order_relaxed);
@@ -1258,7 +1268,7 @@ void BlockBasedTableBuilder::CompressAndVerifyBlock(
     }
     assert(compression_dict != nullptr);
     CompressionInfo compression_info(r->compression_opts, compression_ctx,
-                                     *compression_dict, r->compression_type,
+                                     *compression_dict, *type,
                                      r->sample_for_compression);
 
     std::string sampled_output_fast;
@@ -1565,7 +1575,6 @@ IOStatus BlockBasedTableBuilder::io_status() const {
 Status BlockBasedTableBuilder::InsertBlockInCacheHelper(
     const Slice& block_contents, const BlockHandle* handle,
     BlockType block_type) {
-
   Cache* block_cache = rep_->table_options.block_cache.get();
   Status s;
   auto helper =
@@ -1958,9 +1967,8 @@ void BlockBasedTableBuilder::EnterUnbuffered() {
   }
   r->compression_dict.reset(new CompressionDict(dict, r->compression_type,
                                                 r->compression_opts.level));
-  r->verify_dict.reset(new UncompressionDict(
-      dict, r->compression_type == kZSTD ||
-                r->compression_type == kZSTDNotFinalCompression));
+  r->verify_dict.reset(
+      new UncompressionDict(dict, r->compression_type == kZSTD));
 
   auto get_iterator_for_block = [&r](size_t i) {
     auto& data_block = r->data_block_buffers[i];
@@ -2187,4 +2195,8 @@ const std::string BlockBasedTable::kObsoleteFilterBlockPrefix = "filter.";
 const std::string BlockBasedTable::kFullFilterBlockPrefix = "fullfilter.";
 const std::string BlockBasedTable::kPartitionedFilterBlockPrefix =
     "partitionedfilter.";
+
+#ifndef NDEBUG
+RelaxedAtomic<uint64_t> g_hack_mixed_compression_in_block_based_table{0};
+#endif  // !NDEBUG
 }  // namespace ROCKSDB_NAMESPACE

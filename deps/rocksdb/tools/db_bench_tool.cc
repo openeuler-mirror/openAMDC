@@ -62,6 +62,7 @@
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/stats_history.h"
 #include "rocksdb/table.h"
+#include "rocksdb/tool_hooks.h"
 #include "rocksdb/utilities/backup_engine.h"
 #include "rocksdb/utilities/object_registry.h"
 #include "rocksdb/utilities/optimistic_transaction_db.h"
@@ -458,20 +459,6 @@ DEFINE_int32(min_write_buffer_number_to_merge,
              " writing less data to storage if there are duplicate records "
              " in each of these individual write buffers.");
 
-DEFINE_int32(max_write_buffer_number_to_maintain,
-             ROCKSDB_NAMESPACE::Options().max_write_buffer_number_to_maintain,
-             "The total maximum number of write buffers to maintain in memory "
-             "including copies of buffers that have already been flushed. "
-             "Unlike max_write_buffer_number, this parameter does not affect "
-             "flushing. This controls the minimum amount of write history "
-             "that will be available in memory for conflict checking when "
-             "Transactions are used. If this value is too low, some "
-             "transactions may fail at commit time due to not being able to "
-             "determine whether there were any write conflicts. Setting this "
-             "value to 0 will cause write buffers to be freed immediately "
-             "after they are flushed.  If this value is set to -1, "
-             "'max_write_buffer_number' will be used.");
-
 DEFINE_int64(max_write_buffer_size_to_maintain,
              ROCKSDB_NAMESPACE::Options().max_write_buffer_size_to_maintain,
              "The total maximum size of write buffers to maintain in memory "
@@ -760,9 +747,6 @@ DEFINE_uint64(compaction_readahead_size,
               "Compaction readahead size");
 
 DEFINE_int32(log_readahead_size, 0, "WAL and manifest readahead size");
-
-DEFINE_int32(random_access_max_buffer_size, 1024 * 1024,
-             "Maximum windows randomaccess buffer size");
 
 DEFINE_int32(writable_file_max_buffer_size, 1024 * 1024,
              "Maximum write buffer for Writable File");
@@ -1075,7 +1059,6 @@ DEFINE_string(
 static enum ROCKSDB_NAMESPACE::CompressionType
     FLAGS_blob_db_compression_type_e = ROCKSDB_NAMESPACE::kSnappyCompression;
 
-
 // Integrated BlobDB options
 DEFINE_bool(
     enable_blob_files,
@@ -1146,7 +1129,6 @@ DEFINE_int32(prepopulate_blob_cache, 0,
              "[Integrated BlobDB] Pre-populate hot/warm blobs in blob cache. 0 "
              "to disable and 1 to insert during flush.");
 
-
 // Secondary DB instance Options
 DEFINE_bool(use_secondary_db, false,
             "Open a RocksDB secondary instance. A primary instance can be "
@@ -1171,7 +1153,6 @@ DEFINE_bool(report_bg_io_stats, false,
 
 DEFINE_bool(use_stderr_info_logger, false,
             "Write info logs to stderr instead of to LOG file. ");
-
 
 DEFINE_string(trace_file, "", "Trace workload to a file. ");
 
@@ -1288,6 +1269,20 @@ DEFINE_bool(
 
 DEFINE_bool(paranoid_memory_checks, false,
             "Sets CF option paranoid_memory_checks");
+
+DEFINE_bool(
+    auto_refresh_iterator_with_snapshot, false,
+    "When set to true, RocksDB iterator will automatically refresh itself "
+    "upon detecting stale superversion - preserving its' original snapshot");
+
+DEFINE_bool(explicit_snapshot, false,
+            "When set to true iterators will be initialized with explicit "
+            "snapshot");
+
+DEFINE_uint32(memtable_op_scan_flush_trigger,
+              ROCKSDB_NAMESPACE::AdvancedColumnFamilyOptions()
+                  .memtable_op_scan_flush_trigger,
+              "Setting for CF option memtable_op_scan_flush_trigger.");
 
 static enum ROCKSDB_NAMESPACE::CompressionType StringToCompressionType(
     const char* ctype) {
@@ -1811,6 +1806,8 @@ DEFINE_bool(build_info, false,
 DEFINE_bool(track_and_verify_wals_in_manifest, false,
             "If true, enable WAL tracking in the MANIFEST");
 
+DEFINE_bool(track_and_verify_wals, false, "See Options.track_and_verify_wals");
+
 namespace ROCKSDB_NAMESPACE {
 namespace {
 static Status CreateMemTableRepFactory(
@@ -2001,11 +1998,7 @@ struct DBWithColumnFamilies {
   std::vector<int> cfh_idx_to_prob;  // ith index holds probability of operating
                                      // on cfh[i].
 
-  DBWithColumnFamilies()
-      : db(nullptr)
-        ,
-        opt_txn_db(nullptr)
-  {
+  DBWithColumnFamilies() : db(nullptr), opt_txn_db(nullptr) {
     cfh.clear();
     num_created = 0;
     num_hot = 0;
@@ -2017,8 +2010,7 @@ struct DBWithColumnFamilies {
         opt_txn_db(other.opt_txn_db),
         num_created(other.num_created.load()),
         num_hot(other.num_hot),
-        cfh_idx_to_prob(other.cfh_idx_to_prob) {
-  }
+        cfh_idx_to_prob(other.cfh_idx_to_prob) {}
 
   void DeleteDBs() {
     std::for_each(cfh.begin(), cfh.end(),
@@ -3457,11 +3449,11 @@ class Benchmark {
     exit(1);
   }
 
-  void Run() {
+  void Run(ToolHooks& hooks) {
     if (!SanityCheck()) {
       ErrorExit();
     }
-    Open(&open_options_);
+    Open(&open_options_, hooks);
     PrintHeader(open_options_);
     std::stringstream benchmark_stream(FLAGS_benchmarks);
     std::string name;
@@ -3498,6 +3490,8 @@ class Benchmark {
       read_options_.async_io = FLAGS_async_io;
       read_options_.optimize_multiget_for_io = FLAGS_optimize_multiget_for_io;
       read_options_.auto_readahead_size = FLAGS_auto_readahead_size;
+      read_options_.auto_refresh_iterator_with_snapshot =
+          FLAGS_auto_refresh_iterator_with_snapshot;
 
       void (Benchmark::*method)(ThreadState*) = nullptr;
       void (Benchmark::*post_process_method)() = nullptr;
@@ -3803,7 +3797,7 @@ class Benchmark {
           }
           multi_dbs_.clear();
         }
-        Open(&open_options_);  // use open_options for the last accessed
+        Open(&open_options_, hooks);  // use open_options for the last accessed
       }
 
       if (method != nullptr) {
@@ -4268,8 +4262,6 @@ class Benchmark {
     options.max_write_buffer_number = FLAGS_max_write_buffer_number;
     options.min_write_buffer_number_to_merge =
         FLAGS_min_write_buffer_number_to_merge;
-    options.max_write_buffer_number_to_maintain =
-        FLAGS_max_write_buffer_number_to_maintain;
     options.max_write_buffer_size_to_maintain =
         FLAGS_max_write_buffer_size_to_maintain;
     options.max_background_jobs = FLAGS_max_background_jobs;
@@ -4313,7 +4305,6 @@ class Benchmark {
     options.max_file_opening_threads = FLAGS_file_opening_threads;
     options.compaction_readahead_size = FLAGS_compaction_readahead_size;
     options.log_readahead_size = FLAGS_log_readahead_size;
-    options.random_access_max_buffer_size = FLAGS_random_access_max_buffer_size;
     options.writable_file_max_buffer_size = FLAGS_writable_file_max_buffer_size;
     options.use_fsync = FLAGS_use_fsync;
     options.num_levels = FLAGS_num_levels;
@@ -4729,6 +4720,7 @@ class Benchmark {
     options.allow_data_in_errors = FLAGS_allow_data_in_errors;
     options.track_and_verify_wals_in_manifest =
         FLAGS_track_and_verify_wals_in_manifest;
+    options.track_and_verify_wals = FLAGS_track_and_verify_wals;
 
     // Integrated BlobDB
     options.enable_blob_files = FLAGS_enable_blob_files;
@@ -4760,9 +4752,11 @@ class Benchmark {
     options.block_protection_bytes_per_key =
         FLAGS_block_protection_bytes_per_key;
     options.paranoid_memory_checks = FLAGS_paranoid_memory_checks;
+    options.memtable_op_scan_flush_trigger =
+        FLAGS_memtable_op_scan_flush_trigger;
   }
 
-  void InitializeOptionsGeneral(Options* opts) {
+  void InitializeOptionsGeneral(Options* opts, ToolHooks& hooks) {
     // Be careful about what is set here to avoid accidentally overwriting
     // settings already configured by OPTIONS file. Only configure settings that
     // are needed for the benchmark to run, settings for shared objects that
@@ -4855,7 +4849,7 @@ class Benchmark {
     }
 
     if (FLAGS_num_multi_db <= 1) {
-      OpenDb(options, FLAGS_db, &db_);
+      OpenDb(options, hooks, FLAGS_db, &db_);
     } else {
       multi_dbs_.clear();
       multi_dbs_.resize(FLAGS_num_multi_db);
@@ -4864,7 +4858,7 @@ class Benchmark {
         if (!wal_dir.empty()) {
           options.wal_dir = GetPathForMultiple(wal_dir, i);
         }
-        OpenDb(options, GetPathForMultiple(FLAGS_db, i), &multi_dbs_[i]);
+        OpenDb(options, hooks, GetPathForMultiple(FLAGS_db, i), &multi_dbs_[i]);
       }
       options.wal_dir = wal_dir;
     }
@@ -4891,15 +4885,15 @@ class Benchmark {
     }
   }
 
-  void Open(Options* opts) {
+  void Open(Options* opts, ToolHooks& hooks) {
     if (!InitializeOptionsFromFile(opts)) {
       InitializeOptionsFromFlags(opts);
     }
 
-    InitializeOptionsGeneral(opts);
+    InitializeOptionsGeneral(opts, hooks);
   }
 
-  void OpenDb(Options options, const std::string& db_name,
+  void OpenDb(Options options, ToolHooks& hooks, const std::string& db_name,
               DBWithColumnFamilies* db) {
     uint64_t open_start = FLAGS_report_open_timing ? FLAGS_env->NowNanos() : 0;
     Status s;
@@ -4940,11 +4934,11 @@ class Benchmark {
         }
       }
       if (FLAGS_readonly) {
-        s = DB::OpenForReadOnly(options, db_name, column_families, &db->cfh,
-                                &db->db);
+        s = hooks.OpenForReadOnly(options, db_name, column_families, &db->cfh,
+                                  &db->db);
       } else if (FLAGS_optimistic_transaction_db) {
-        s = OptimisticTransactionDB::Open(options, db_name, column_families,
-                                          &db->cfh, &db->opt_txn_db);
+        s = hooks.OpenOptimisticTransactionDB(options, db_name, column_families,
+                                              &db->cfh, &db->opt_txn_db);
         if (s.ok()) {
           db->db = db->opt_txn_db->GetBaseDB();
         }
@@ -4956,22 +4950,22 @@ class Benchmark {
           txn_db_options.skip_concurrency_control = true;
           txn_db_options.write_policy = WRITE_PREPARED;
         }
-        s = TransactionDB::Open(options, txn_db_options, db_name,
-                                column_families, &db->cfh, &ptr);
+        s = hooks.OpenTransactionDB(options, txn_db_options, db_name,
+                                    column_families, &db->cfh, &ptr);
         if (s.ok()) {
           db->db = ptr;
         }
       } else {
-        s = DB::Open(options, db_name, column_families, &db->cfh, &db->db);
+        s = hooks.Open(options, db_name, column_families, &db->cfh, &db->db);
       }
       db->cfh.resize(FLAGS_num_column_families);
       db->num_created = num_hot;
       db->num_hot = num_hot;
       db->cfh_idx_to_prob = std::move(cfh_idx_to_prob);
     } else if (FLAGS_readonly) {
-      s = DB::OpenForReadOnly(options, db_name, &db->db);
+      s = hooks.OpenForReadOnly(options, db_name, &db->db, false);
     } else if (FLAGS_optimistic_transaction_db) {
-      s = OptimisticTransactionDB::Open(options, db_name, &db->opt_txn_db);
+      s = hooks.OpenOptimisticTransactionDB(options, db_name, &db->opt_txn_db);
       if (s.ok()) {
         db->db = db->opt_txn_db->GetBaseDB();
       }
@@ -4985,7 +4979,7 @@ class Benchmark {
       }
       s = CreateLoggerFromOptions(db_name, options, &options.info_log);
       if (s.ok()) {
-        s = TransactionDB::Open(options, txn_db_options, db_name, &ptr);
+        s = hooks.OpenTransactionDB(options, txn_db_options, db_name, &ptr);
       }
       if (s.ok()) {
         db->db = ptr;
@@ -5003,7 +4997,7 @@ class Benchmark {
       blob_db_options.blob_file_size = FLAGS_blob_db_file_size;
       blob_db_options.compression = FLAGS_blob_db_compression_type_e;
       blob_db::BlobDB* ptr = nullptr;
-      s = blob_db::BlobDB::Open(options, blob_db_options, db_name, &ptr);
+      s = hooks.Open(options, blob_db_options, db_name, &ptr);
       if (s.ok()) {
         db->db = ptr;
       }
@@ -5014,7 +5008,8 @@ class Benchmark {
         default_secondary_path += "/dbbench_secondary";
         FLAGS_secondary_path = default_secondary_path;
       }
-      s = DB::OpenAsSecondary(options, db_name, FLAGS_secondary_path, &db->db);
+      s = hooks.OpenAsSecondary(options, db_name, FLAGS_secondary_path,
+                                &db->db);
       if (s.ok() && FLAGS_secondary_update_interval > 0) {
         secondary_update_thread_.reset(new port::Thread(
             [this](int interval, DBWithColumnFamilies* _db) {
@@ -5035,12 +5030,12 @@ class Benchmark {
       }
     } else if (FLAGS_open_as_follower) {
       std::unique_ptr<DB> dbptr;
-      s = DB::OpenAsFollower(options, db_name, FLAGS_leader_path, &dbptr);
+      s = hooks.OpenAsFollower(options, db_name, FLAGS_leader_path, &dbptr);
       if (s.ok()) {
         db->db = dbptr.release();
       }
     } else {
-      s = DB::Open(options, db_name, &db->db);
+      s = hooks.Open(options, db_name, &db->db);
     }
     if (FLAGS_report_open_timing) {
       std::cout << "OpenDb:     "
@@ -5904,6 +5899,13 @@ class Benchmark {
     options.adaptive_readahead = FLAGS_adaptive_readahead;
     options.async_io = FLAGS_async_io;
     options.auto_readahead_size = FLAGS_auto_readahead_size;
+    std::unique_ptr<ManagedSnapshot> snapshot = nullptr;
+    if (FLAGS_explicit_snapshot) {
+      snapshot = std::make_unique<ManagedSnapshot>(db);
+      options.snapshot = snapshot->snapshot();
+    } else {
+      options.snapshot = nullptr;
+    }
 
     Iterator* iter = db->NewIterator(options);
     int64_t i = 0;
@@ -6860,6 +6862,13 @@ class Benchmark {
 
     Duration duration(FLAGS_duration, reads_);
     char value_buffer[256];
+    std::unique_ptr<ManagedSnapshot> snapshot = nullptr;
+    if (FLAGS_explicit_snapshot) {
+      snapshot = std::make_unique<ManagedSnapshot>(db_.db);
+      options.snapshot = snapshot->snapshot();
+    } else {
+      options.snapshot = nullptr;
+    }
     while (!duration.Done(1)) {
       int64_t seek_pos = thread->rand.Next() % FLAGS_num;
       GenerateKeyFromIntForSeek(static_cast<uint64_t>(seek_pos), FLAGS_num,
@@ -7188,6 +7197,13 @@ class Benchmark {
       ts_guard.reset(new char[user_timestamp_size_]);
       ts = mock_app_clock_->GetTimestampForRead(thread->rand, ts_guard.get());
       read_options.timestamp = &ts;
+    }
+    std::unique_ptr<ManagedSnapshot> snapshot = nullptr;
+    if (FLAGS_explicit_snapshot) {
+      snapshot = std::make_unique<ManagedSnapshot>(db_.db);
+      read_options.snapshot = snapshot->snapshot();
+    } else {
+      read_options.snapshot = nullptr;
     }
     Iterator* iter = db_.db->NewIterator(read_options);
 
@@ -7803,6 +7819,13 @@ class Benchmark {
       ts_guard.reset(new char[user_timestamp_size_]);
       ts = mock_app_clock_->GetTimestampForRead(thread->rand, ts_guard.get());
       read_opts.timestamp = &ts;
+    }
+    std::unique_ptr<ManagedSnapshot> snapshot = nullptr;
+    if (FLAGS_explicit_snapshot) {
+      snapshot = std::make_unique<ManagedSnapshot>(db);
+      read_opts.snapshot = snapshot->snapshot();
+    } else {
+      read_opts.snapshot = nullptr;
     }
     std::unique_ptr<Iterator> iter(db->NewIterator(read_opts));
 
@@ -8543,7 +8566,6 @@ class Benchmark {
     }
   }
 
-
   void Replay(ThreadState* thread) {
     if (db_.db != nullptr) {
       Replay(thread, &db_);
@@ -8631,10 +8653,9 @@ class Benchmark {
     assert(s.ok());
     delete backup_engine;
   }
-
 };
 
-int db_bench_tool(int argc, char** argv) {
+int db_bench_tool(int argc, char** argv, ToolHooks& hooks) {
   ROCKSDB_NAMESPACE::port::InstallStackTraceHandler();
   ConfigOptions config_options;
   static bool initialized = false;
@@ -8786,7 +8807,7 @@ int db_bench_tool(int argc, char** argv) {
   }
 
   ROCKSDB_NAMESPACE::Benchmark benchmark;
-  benchmark.Run();
+  benchmark.Run(hooks);
 
   if (FLAGS_print_malloc_stats) {
     std::string stats_string;

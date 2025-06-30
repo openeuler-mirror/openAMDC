@@ -2129,6 +2129,10 @@ int main(int argc, char** argv) {
     CheckCondition(100000 ==
                    rocksdb_options_get_periodic_compaction_seconds(o));
 
+    rocksdb_options_set_memtable_op_scan_flush_trigger(o, 100);
+    CheckCondition(100 ==
+                   rocksdb_options_get_memtable_op_scan_flush_trigger(o));
+
     rocksdb_options_set_ttl(o, 5000);
     CheckCondition(5000 == rocksdb_options_get_ttl(o));
 
@@ -2145,10 +2149,6 @@ int main(int argc, char** argv) {
     rocksdb_options_set_min_write_buffer_number_to_merge(o, 23);
     CheckCondition(23 ==
                    rocksdb_options_get_min_write_buffer_number_to_merge(o));
-
-    rocksdb_options_set_max_write_buffer_number_to_maintain(o, 64);
-    CheckCondition(64 ==
-                   rocksdb_options_get_max_write_buffer_number_to_maintain(o));
 
     rocksdb_options_set_max_write_buffer_size_to_maintain(o, 50000);
     CheckCondition(50000 ==
@@ -2407,8 +2407,6 @@ int main(int argc, char** argv) {
     CheckCondition(97 == rocksdb_options_get_max_write_buffer_number(copy));
     CheckCondition(23 ==
                    rocksdb_options_get_min_write_buffer_number_to_merge(copy));
-    CheckCondition(
-        64 == rocksdb_options_get_max_write_buffer_number_to_maintain(copy));
     CheckCondition(50000 ==
                    rocksdb_options_get_max_write_buffer_size_to_maintain(copy));
     CheckCondition(1 == rocksdb_options_get_enable_pipelined_write(copy));
@@ -2572,6 +2570,12 @@ int main(int argc, char** argv) {
     CheckCondition(100000 ==
                    rocksdb_options_get_periodic_compaction_seconds(o));
 
+    rocksdb_options_set_memtable_op_scan_flush_trigger(copy, 800);
+    CheckCondition(800 ==
+                   rocksdb_options_get_memtable_op_scan_flush_trigger(copy));
+    CheckCondition(100 ==
+                   rocksdb_options_get_memtable_op_scan_flush_trigger(o));
+
     rocksdb_options_set_ttl(copy, 8000);
     CheckCondition(8000 == rocksdb_options_get_ttl(copy));
     CheckCondition(5000 == rocksdb_options_get_ttl(o));
@@ -2595,12 +2599,6 @@ int main(int argc, char** argv) {
                    rocksdb_options_get_min_write_buffer_number_to_merge(copy));
     CheckCondition(23 ==
                    rocksdb_options_get_min_write_buffer_number_to_merge(o));
-
-    rocksdb_options_set_max_write_buffer_number_to_maintain(copy, 128);
-    CheckCondition(
-        128 == rocksdb_options_get_max_write_buffer_number_to_maintain(copy));
-    CheckCondition(64 ==
-                   rocksdb_options_get_max_write_buffer_number_to_maintain(o));
 
     rocksdb_options_set_max_write_buffer_size_to_maintain(copy, 9000);
     CheckCondition(9000 ==
@@ -2937,6 +2935,15 @@ int main(int argc, char** argv) {
 
     rocksdb_compactoptions_set_target_level(co, 1);
     CheckCondition(1 == rocksdb_compactoptions_get_target_level(co));
+
+    rocksdb_compactoptions_set_target_path_id(co, 1);
+    CheckCondition(1 == rocksdb_compactoptions_get_target_path_id(co));
+
+    rocksdb_compactoptions_set_allow_write_stall(co, 1);
+    CheckCondition(1 == rocksdb_compactoptions_get_allow_write_stall(co));
+
+    rocksdb_compactoptions_set_max_subcompactions(co, 1);
+    CheckCondition(1 == rocksdb_compactoptions_get_max_subcompactions(co));
 
     rocksdb_compactoptions_destroy(co);
   }

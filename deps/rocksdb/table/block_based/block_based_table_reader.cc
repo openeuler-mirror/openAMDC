@@ -660,7 +660,7 @@ Status BlockBasedTable::Open(
   const bool preload_all = !table_options.cache_index_and_filter_blocks;
 
   if (!ioptions.allow_mmap_reads && !env_options.use_mmap_reads) {
-    s = PrefetchTail(ro, file.get(), file_size, force_direct_prefetch,
+    s = PrefetchTail(ro, ioptions, file.get(), file_size, force_direct_prefetch,
                      tail_prefetch_stats, prefetch_all, preload_all,
                      &prefetch_buffer, ioptions.stats, tail_size,
                      ioptions.logger);
@@ -740,11 +740,8 @@ Status BlockBasedTable::Open(
 
   // Populate BlockCreateContext
   bool blocks_definitely_zstd_compressed =
-      rep->table_properties &&
-      (rep->table_properties->compression_name ==
-           CompressionTypeToString(kZSTD) ||
-       rep->table_properties->compression_name ==
-           CompressionTypeToString(kZSTDNotFinalCompression));
+      rep->table_properties && (rep->table_properties->compression_name ==
+                                CompressionTypeToString(kZSTD));
   rep->create_context = BlockCreateContext(
       &rep->table_options, &rep->ioptions, rep->ioptions.stats,
       blocks_definitely_zstd_compressed, block_protection_bytes_per_key,
@@ -877,7 +874,8 @@ Status BlockBasedTable::Open(
 }
 
 Status BlockBasedTable::PrefetchTail(
-    const ReadOptions& ro, RandomAccessFileReader* file, uint64_t file_size,
+    const ReadOptions& ro, const ImmutableOptions& ioptions,
+    RandomAccessFileReader* file, uint64_t file_size,
     bool force_direct_prefetch, TailPrefetchStats* tail_prefetch_stats,
     const bool prefetch_all, const bool preload_all,
     std::unique_ptr<FilePrefetchBuffer>* prefetch_buffer, Statistics* stats,
@@ -916,6 +914,7 @@ Status BlockBasedTable::PrefetchTail(
                      "TailPrefetchStats.",
                      file->file_name().c_str(), tail_prefetch_size);
     }
+    TEST_SYNC_POINT("BlockBasedTable::PrefetchTail::TaiSizeNotRecorded");
   }
   size_t prefetch_off;
   size_t prefetch_len;
@@ -948,7 +947,7 @@ Status BlockBasedTable::PrefetchTail(
   // Use `FilePrefetchBuffer`
   prefetch_buffer->reset(new FilePrefetchBuffer(
       ReadaheadParams(), true /* enable */, true /* track_min_offset */,
-      nullptr /* fs */, nullptr /* clock */, stats,
+      ioptions.fs.get() /* fs */, nullptr /* clock */, stats,
       /* readahead_cb */ nullptr,
       FilePrefetchBufferUsage::kTableOpenPrefetchTail));
 
@@ -1106,71 +1105,24 @@ Status BlockBasedTable::PrefetchIndexAndFilterBlocks(
   // Find filter handle and filter type
   if (rep_->filter_policy) {
     auto name = rep_->filter_policy->CompatibilityName();
-    bool builtin_compatible =
-        strcmp(name, BuiltinFilterPolicy::kCompatibilityName()) == 0;
-
     for (const auto& [filter_type, prefix] :
          {std::make_pair(Rep::FilterType::kFullFilter, kFullFilterBlockPrefix),
           std::make_pair(Rep::FilterType::kPartitionedFilter,
                          kPartitionedFilterBlockPrefix),
           std::make_pair(Rep::FilterType::kNoFilter,
                          kObsoleteFilterBlockPrefix)}) {
-      if (builtin_compatible) {
-        // This code is only here to deal with a hiccup in early 7.0.x where
-        // there was an unintentional name change in the SST files metadata.
-        // It should be OK to remove this in the future (late 2022) and just
-        // have the 'else' code.
-        // NOTE: the test:: names below are likely not needed but included
-        // out of caution
-        static const std::unordered_set<std::string> kBuiltinNameAndAliases = {
-            BuiltinFilterPolicy::kCompatibilityName(),
-            test::LegacyBloomFilterPolicy::kClassName(),
-            test::FastLocalBloomFilterPolicy::kClassName(),
-            test::Standard128RibbonFilterPolicy::kClassName(),
-            "rocksdb.internal.DeprecatedBlockBasedBloomFilter",
-            BloomFilterPolicy::kClassName(),
-            RibbonFilterPolicy::kClassName(),
-        };
-
-        // For efficiency, do a prefix seek and see if the first match is
-        // good.
-        meta_iter->Seek(prefix);
-        if (meta_iter->status().ok() && meta_iter->Valid()) {
-          Slice key = meta_iter->key();
-          if (key.starts_with(prefix)) {
-            key.remove_prefix(prefix.size());
-            if (kBuiltinNameAndAliases.find(key.ToString()) !=
-                kBuiltinNameAndAliases.end()) {
-              Slice v = meta_iter->value();
-              Status s = rep_->filter_handle.DecodeFrom(&v);
-              if (s.ok()) {
-                rep_->filter_type = filter_type;
-                if (filter_type == Rep::FilterType::kNoFilter) {
-                  ROCKS_LOG_WARN(rep_->ioptions.logger,
-                                 "Detected obsolete filter type in %s. Read "
-                                 "performance might suffer until DB is fully "
-                                 "re-compacted.",
-                                 rep_->file->file_name().c_str());
-                }
-                break;
-              }
-            }
-          }
+      std::string filter_block_key = prefix + name;
+      if (FindMetaBlock(meta_iter, filter_block_key, &rep_->filter_handle)
+              .ok()) {
+        rep_->filter_type = filter_type;
+        if (filter_type == Rep::FilterType::kNoFilter) {
+          ROCKS_LOG_WARN(
+              rep_->ioptions.logger,
+              "Detected obsolete filter type in %s. Read performance might "
+              "suffer until DB is fully re-compacted.",
+              rep_->file->file_name().c_str());
         }
-      } else {
-        std::string filter_block_key = prefix + name;
-        if (FindMetaBlock(meta_iter, filter_block_key, &rep_->filter_handle)
-                .ok()) {
-          rep_->filter_type = filter_type;
-          if (filter_type == Rep::FilterType::kNoFilter) {
-            ROCKS_LOG_WARN(
-                rep_->ioptions.logger,
-                "Detected obsolete filter type in %s. Read performance might "
-                "suffer until DB is fully re-compacted.",
-                rep_->file->file_name().c_str());
-          }
-          break;
-        }
+        break;
       }
     }
   }

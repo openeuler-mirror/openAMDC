@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <numeric>
 #include <string>
 #include <thread>
 
@@ -17,6 +18,8 @@
 #include "rocksdb/db.h"
 #include "rocksdb/options.h"
 #include "rocksdb/perf_context.h"
+#include "rocksdb/utilities/secondary_index.h"
+#include "rocksdb/utilities/secondary_index_simple.h"
 #include "rocksdb/utilities/transaction.h"
 #include "rocksdb/utilities/transaction_db.h"
 #include "table/mock_table.h"
@@ -27,7 +30,7 @@
 #include "util/random.h"
 #include "util/string_util.h"
 #include "utilities/merge_operators.h"
-#include "utilities/merge_operators/string_append/stringappend.h"
+#include "utilities/secondary_index/secondary_index_helper.h"
 #include "utilities/transactions/pessimistic_transaction_db.h"
 
 namespace ROCKSDB_NAMESPACE {
@@ -2202,6 +2205,46 @@ TEST_P(TransactionTest, TwoPhaseLogRollingTest2) {
   delete cfa;
   delete cfb;
 }
+
+TEST_P(TransactionTest, TwoPhaseLogMultiMemtableFlush) {
+  // Test that min log number to keep is tracked correctly when
+  // multiple memtables are flushed together.
+  DBImpl* db_impl = static_cast_with_check<DBImpl>(db->GetRootDB());
+  // So that two immutable memtable won't stall writes.
+  ASSERT_OK(db->SetOptions({{"max_write_buffer_number", "4"}}));
+  // Pause flush.
+  ASSERT_OK(db->PauseBackgroundWork());
+
+  WriteOptions wopts;
+  wopts.disableWAL = false;
+  wopts.sync = true;
+  TransactionOptions topts;
+  Transaction* txn1 = db->BeginTransaction(wopts, topts);
+  ASSERT_OK(txn1->Put("key1", "val1"));
+  ASSERT_OK(txn1->SetName("xid1"));
+  ASSERT_OK(txn1->Prepare());
+  ASSERT_OK(txn1->Commit());
+  delete txn1;
+
+  ASSERT_OK(db_impl->TEST_SwitchMemtable());
+
+  Transaction* txn2 = db->BeginTransaction(wopts, topts);
+  ASSERT_OK(txn2->Put("key2", "val2"));
+  ASSERT_OK(txn2->SetName("xid2"));
+  ASSERT_OK(txn2->Prepare());
+  ASSERT_OK(txn2->Commit());
+  delete txn2;
+
+  ASSERT_OK(db_impl->TEST_SwitchMemtable());
+
+  ASSERT_OK(db->ContinueBackgroundWork());
+  ASSERT_OK(db->Flush({}));
+
+  uint64_t cur_wal_num = db_impl->TEST_GetCurrentLogNumber();
+  // All non-active WALs should be obsolete.
+  ASSERT_EQ(cur_wal_num, db_impl->MinLogNumberToKeep());
+}
+
 /*
  * 1) use prepare to keep first log around to determine starting sequence
  * during recovery.
@@ -2515,6 +2558,9 @@ TEST_P(TransactionTest, FlushTest2) {
       case 0:
         break;
       case 1:
+        // Skip verifying record count against TableProperties for
+        // MockTables
+        options.compaction_verify_record_count = false;
         options.table_factory.reset(new mock::MockTableFactory());
         break;
       case 2: {
@@ -5609,13 +5655,13 @@ TEST_P(TransactionTest, ToggleAutoCompactionTest) {
   ASSERT_OK(s);
 
   auto cfh_default = static_cast_with_check<ColumnFamilyHandleImpl>(handles[0]);
-  auto opt_default = *cfh_default->cfd()->GetLatestMutableCFOptions();
+  auto& opt_default = cfh_default->cfd()->GetLatestMutableCFOptions();
 
   auto cfh_a = static_cast_with_check<ColumnFamilyHandleImpl>(handles[1]);
-  auto opt_a = *cfh_a->cfd()->GetLatestMutableCFOptions();
+  auto& opt_a = cfh_a->cfd()->GetLatestMutableCFOptions();
 
   auto cfh_b = static_cast_with_check<ColumnFamilyHandleImpl>(handles[2]);
-  auto opt_b = *cfh_b->cfd()->GetLatestMutableCFOptions();
+  auto& opt_b = cfh_b->cfd()->GetLatestMutableCFOptions();
 
   ASSERT_EQ(opt_default.disable_auto_compactions, false);
   ASSERT_EQ(opt_a.disable_auto_compactions, true);
@@ -6249,8 +6295,8 @@ TEST_P(TransactionTest, DuplicateKeys) {
         }
         delete cf_handle;
       }  // with_commit_batch
-    }    // do_rollback
-  }      // do_prepare
+    }  // do_rollback
+  }  // do_prepare
 
   if (!options.unordered_write) {
     // Also test with max_successive_merges > 0. max_successive_merges will not
@@ -7465,6 +7511,240 @@ TEST_P(TransactionTest, PutEntityRecovery) {
   }
 }
 
+TEST_P(TransactionTest, CoalescingIterator) {
+  const TxnDBWritePolicy write_policy = std::get<2>(GetParam());
+  if (write_policy != TxnDBWritePolicy::WRITE_COMMITTED) {
+    ROCKSDB_GTEST_BYPASS("Test only WriteCommitted for now");
+    return;
+  }
+
+  ColumnFamilyOptions cf_opts;
+  cf_opts.enable_blob_files = true;
+
+  ColumnFamilyHandle* cfh1 = nullptr;
+  ASSERT_OK(db->CreateColumnFamily(cf_opts, "cf1", &cfh1));
+  std::unique_ptr<ColumnFamilyHandle> cfh1_guard(cfh1);
+
+  ColumnFamilyHandle* cfh2 = nullptr;
+  ASSERT_OK(db->CreateColumnFamily(cf_opts, "cf2", &cfh2));
+  std::unique_ptr<ColumnFamilyHandle> cfh2_guard(cfh2);
+
+  // Note: "cf1" keys are present only in CF1; "cf2" keys are only present in
+  // CF2; "cf12" keys are present in both CFs. "a" keys are present only in the
+  // database; "b" keys are present only in the transaction; "c" keys are
+  // present in both the database and the transaction. The values indicate the
+  // column family as well as whether the entry came from the database or the
+  // transaction.
+
+  ASSERT_OK(db->Put(WriteOptions(), cfh1, "cf1_a", "cf1_a_db_cf1"));
+  ASSERT_OK(db->Put(WriteOptions(), cfh1, "cf1_c", "cf1_c_db_cf1"));
+
+  ASSERT_OK(db->Put(WriteOptions(), cfh2, "cf2_a", "cf2_a_db_cf2"));
+  ASSERT_OK(db->Put(WriteOptions(), cfh2, "cf2_c", "cf2_c_db_cf2"));
+
+  ASSERT_OK(db->Put(WriteOptions(), cfh1, "cf12_a", "cf12_a_db_cf1"));
+  ASSERT_OK(db->Put(WriteOptions(), cfh2, "cf12_a", "cf12_a_db_cf2"));
+  ASSERT_OK(db->Put(WriteOptions(), cfh1, "cf12_c", "cf12_c_db_cf1"));
+  ASSERT_OK(db->Put(WriteOptions(), cfh2, "cf12_c", "cf12_c_db_cf2"));
+
+  ASSERT_OK(db->Flush(FlushOptions(), cfh1));
+  ASSERT_OK(db->Flush(FlushOptions(), cfh2));
+
+  std::unique_ptr<Transaction> txn(db->BeginTransaction(WriteOptions()));
+
+  ASSERT_OK(txn->Put(cfh1, "cf1_b", "cf1_b_txn_cf1"));
+  ASSERT_OK(txn->Put(cfh1, "cf1_c", "cf1_c_txn_cf1"));
+
+  ASSERT_OK(txn->Put(cfh2, "cf2_b", "cf2_b_txn_cf2"));
+  ASSERT_OK(txn->Put(cfh2, "cf2_c", "cf2_c_txn_cf2"));
+
+  ASSERT_OK(txn->Put(cfh1, "cf12_b", "cf12_b_txn_cf1"));
+  ASSERT_OK(txn->Put(cfh2, "cf12_b", "cf12_b_txn_cf2"));
+  ASSERT_OK(txn->Put(cfh1, "cf12_c", "cf12_c_txn_cf1"));
+  ASSERT_OK(txn->Put(cfh2, "cf12_c", "cf12_c_txn_cf2"));
+
+  auto verify = [&](bool allow_unprepared_value, auto prepare_if_needed) {
+    ReadOptions read_options;
+    read_options.allow_unprepared_value = allow_unprepared_value;
+
+    std::unique_ptr<Iterator> iter(
+        txn->GetCoalescingIterator(read_options, {cfh1, cfh2}));
+
+    {
+      iter->SeekToFirst();
+      ASSERT_TRUE(iter->Valid());
+      ASSERT_OK(iter->status());
+      ASSERT_EQ(iter->key(), "cf12_a");
+
+      prepare_if_needed(iter.get());
+
+      ASSERT_EQ(iter->value(), "cf12_a_db_cf2");
+    }
+
+    {
+      iter->Next();
+      ASSERT_TRUE(iter->Valid());
+      ASSERT_OK(iter->status());
+      ASSERT_EQ(iter->key(), "cf12_b");
+
+      prepare_if_needed(iter.get());
+
+      ASSERT_EQ(iter->value(), "cf12_b_txn_cf2");
+    }
+
+    {
+      iter->Next();
+      ASSERT_TRUE(iter->Valid());
+      ASSERT_OK(iter->status());
+      ASSERT_EQ(iter->key(), "cf12_c");
+
+      prepare_if_needed(iter.get());
+
+      ASSERT_EQ(iter->value(), "cf12_c_txn_cf2");
+    }
+
+    {
+      iter->Next();
+      ASSERT_TRUE(iter->Valid());
+      ASSERT_OK(iter->status());
+      ASSERT_EQ(iter->key(), "cf1_a");
+
+      prepare_if_needed(iter.get());
+
+      ASSERT_EQ(iter->value(), "cf1_a_db_cf1");
+    }
+
+    {
+      iter->Next();
+      ASSERT_TRUE(iter->Valid());
+      ASSERT_OK(iter->status());
+      ASSERT_EQ(iter->key(), "cf1_b");
+
+      prepare_if_needed(iter.get());
+
+      ASSERT_EQ(iter->value(), "cf1_b_txn_cf1");
+    }
+
+    {
+      iter->Next();
+      ASSERT_TRUE(iter->Valid());
+      ASSERT_OK(iter->status());
+      ASSERT_EQ(iter->key(), "cf1_c");
+
+      prepare_if_needed(iter.get());
+
+      ASSERT_EQ(iter->value(), "cf1_c_txn_cf1");
+    }
+
+    {
+      iter->Next();
+      ASSERT_TRUE(iter->Valid());
+      ASSERT_OK(iter->status());
+      ASSERT_EQ(iter->key(), "cf2_a");
+
+      prepare_if_needed(iter.get());
+
+      ASSERT_EQ(iter->value(), "cf2_a_db_cf2");
+    }
+
+    {
+      iter->Next();
+      ASSERT_TRUE(iter->Valid());
+      ASSERT_OK(iter->status());
+      ASSERT_EQ(iter->key(), "cf2_b");
+
+      prepare_if_needed(iter.get());
+
+      ASSERT_EQ(iter->value(), "cf2_b_txn_cf2");
+    }
+
+    {
+      iter->Next();
+      ASSERT_TRUE(iter->Valid());
+      ASSERT_OK(iter->status());
+      ASSERT_EQ(iter->key(), "cf2_c");
+
+      prepare_if_needed(iter.get());
+
+      ASSERT_EQ(iter->value(), "cf2_c_txn_cf2");
+    }
+
+    {
+      iter->Next();
+      ASSERT_FALSE(iter->Valid());
+      ASSERT_OK(iter->status());
+    }
+  };
+
+  verify(/* allow_unprepared_value */ false, [](Iterator*) {});
+  verify(/* allow_unprepared_value */ true, [](Iterator* iter) {
+    ASSERT_TRUE(iter->value().empty());
+    ASSERT_TRUE(iter->PrepareValue());
+  });
+}
+
+TEST_P(TransactionTest, CoalescingIteratorSanityChecks) {
+  ColumnFamilyOptions cf1_opts;
+  ColumnFamilyHandle* cfh1 = nullptr;
+  ASSERT_OK(db->CreateColumnFamily(cf1_opts, "cf1", &cfh1));
+  std::unique_ptr<ColumnFamilyHandle> cfh1_guard(cfh1);
+
+  ColumnFamilyOptions cf2_opts;
+  cf2_opts.comparator = ReverseBytewiseComparator();
+  ColumnFamilyHandle* cfh2 = nullptr;
+  ASSERT_OK(db->CreateColumnFamily(cf2_opts, "cf2", &cfh2));
+  std::unique_ptr<ColumnFamilyHandle> cfh2_guard(cfh2);
+
+  std::unique_ptr<Transaction> txn(db->BeginTransaction(WriteOptions()));
+
+  const TxnDBWritePolicy write_policy = std::get<2>(GetParam());
+  if (write_policy != TxnDBWritePolicy::WRITE_COMMITTED) {
+    {
+      std::unique_ptr<Iterator> iter(
+          txn->GetCoalescingIterator(ReadOptions(), {}));
+      ASSERT_TRUE(iter->status().IsNotSupported());
+    }
+
+    {
+      std::unique_ptr<Iterator> iter(
+          txn->GetCoalescingIterator(ReadOptions(), {cfh1, cfh2}));
+      ASSERT_TRUE(iter->status().IsNotSupported());
+    }
+
+    {
+      ReadOptions read_options;
+      read_options.io_activity = Env::IOActivity::kCompaction;
+
+      std::unique_ptr<Iterator> iter(
+          txn->GetCoalescingIterator(read_options, {cfh1}));
+      ASSERT_TRUE(iter->status().IsNotSupported());
+    }
+
+    return;
+  }
+
+  {
+    std::unique_ptr<Iterator> iter(
+        txn->GetCoalescingIterator(ReadOptions(), {}));
+    ASSERT_TRUE(iter->status().IsInvalidArgument());
+  }
+
+  {
+    std::unique_ptr<Iterator> iter(
+        txn->GetCoalescingIterator(ReadOptions(), {cfh1, cfh2}));
+    ASSERT_TRUE(iter->status().IsInvalidArgument());
+  }
+
+  {
+    ReadOptions read_options;
+    read_options.io_activity = Env::IOActivity::kCompaction;
+
+    std::unique_ptr<Iterator> iter(
+        txn->GetCoalescingIterator(read_options, {cfh1}));
+    ASSERT_TRUE(iter->status().IsInvalidArgument());
+  }
+}
+
 TEST_P(TransactionTest, AttributeGroupIterator) {
   const TxnDBWritePolicy write_policy = std::get<2>(GetParam());
   if (write_policy != TxnDBWritePolicy::WRITE_COMMITTED) {
@@ -7732,6 +8012,811 @@ TEST_P(TransactionTest, AttributeGroupIteratorSanityChecks) {
   }
 }
 
+TEST_P(TransactionTest, SecondaryIndexPutDelete) {
+  const TxnDBWritePolicy write_policy = std::get<2>(GetParam());
+  if (write_policy != TxnDBWritePolicy::WRITE_COMMITTED) {
+    ROCKSDB_GTEST_BYPASS("Test only WriteCommitted for now");
+    return;
+  }
+
+  txn_db_options.secondary_indices.emplace_back(
+      std::make_shared<SimpleSecondaryIndex>(
+          kDefaultWideColumnName.ToString()));
+
+  ASSERT_OK(ReOpen());
+
+  ColumnFamilyOptions cf1_opts;
+  ColumnFamilyHandle* cfh1 = nullptr;
+  ASSERT_OK(db->CreateColumnFamily(cf1_opts, "cf1", &cfh1));
+  std::unique_ptr<ColumnFamilyHandle> cfh1_guard(cfh1);
+
+  ColumnFamilyOptions cf2_opts;
+  ColumnFamilyHandle* cfh2 = nullptr;
+  ASSERT_OK(db->CreateColumnFamily(cf2_opts, "cf2", &cfh2));
+  std::unique_ptr<ColumnFamilyHandle> cfh2_guard(cfh2);
+
+  auto& index = txn_db_options.secondary_indices.back();
+  index->SetPrimaryColumnFamily(cfh1);
+  index->SetSecondaryColumnFamily(cfh2);
+
+  {
+    std::unique_ptr<Transaction> txn(db->BeginTransaction(WriteOptions()));
+
+    // Default CF => OK but not indexed
+    ASSERT_OK(txn->Put(db->DefaultColumnFamily(), "key0", "foo"));
+
+    // CF1 but no default column => OK but not indexed
+    ASSERT_OK(txn->PutEntity(cfh1, "key1", {{"hello", "world"}}));
+
+    // CF1, "bar" in the default column => OK and indexed
+    ASSERT_OK(txn->Put(cfh1, "key2", "bar"));
+
+    // CF1, "baz" in the default column => OK and indexed
+    ASSERT_OK(txn->Put(cfh1, "key3", "baz"));
+
+    ASSERT_OK(txn->Commit());
+  }
+
+  // Expected keys: "key0" in the default CF; "key1", "key2", "key3" in CF1;
+  // secondary index entries for "key2" and "key3" in CF2
+  {
+    std::unique_ptr<Iterator> it(
+        db->NewIterator(ReadOptions(), db->DefaultColumnFamily()));
+
+    it->SeekToFirst();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key0");
+    ASSERT_EQ(it->value(), "foo");
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  {
+    std::unique_ptr<Iterator> it(db->NewIterator(ReadOptions(), cfh1));
+
+    it->SeekToFirst();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key1");
+    WideColumns expected1{{"hello", "world"}};
+    ASSERT_EQ(it->columns(), expected1);
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key2");
+    ASSERT_EQ(it->value(), "bar");
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key3");
+    ASSERT_EQ(it->value(), "baz");
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  {
+    // Read the raw secondary index entries from CF2
+    std::unique_ptr<Iterator> it(db->NewIterator(ReadOptions(), cfh2));
+
+    it->SeekToFirst();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "\3barkey2");
+    ASSERT_TRUE(it->value().empty());
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "\3bazkey3");
+    ASSERT_TRUE(it->value().empty());
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  {
+    // Query the secondary index
+    std::unique_ptr<Iterator> underlying_it(
+        db->NewIterator(ReadOptions(), cfh2));
+    auto it = std::make_unique<SecondaryIndexIterator>(
+        index.get(), std::move(underlying_it));
+
+    it->Seek("bar");
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "key2");
+    ASSERT_TRUE(it->value().empty());
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+
+    it->Seek("baz");
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "key3");
+    ASSERT_TRUE(it->value().empty());
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  // Make some updates to the key-values indexed above through the database
+  // interface (i.e. using implicit transactions)
+
+  // Add a default column to "key1" which previously had none
+  ASSERT_OK(
+      db->PutEntity(WriteOptions(), cfh1, "key1",
+                    {{"hello", "world"}, {kDefaultWideColumnName, "quux"}}));
+
+  // Change the value of the default column in "key2"
+  ASSERT_OK(db->Put(WriteOptions(), cfh1, "key2", "quux"));
+
+  // Remove the default column from "key3"
+  ASSERT_OK(db->PutEntity(WriteOptions(), cfh1, "key3", {{"1", "2"}}));
+
+  // Expected keys: "key0" in the default CF; "key1", "key2", "key3" in CF1;
+  // secondary index entries for "key1" and "key2" in CF2
+  {
+    std::unique_ptr<Iterator> it(
+        db->NewIterator(ReadOptions(), db->DefaultColumnFamily()));
+
+    it->SeekToFirst();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key0");
+    ASSERT_EQ(it->value(), "foo");
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  {
+    std::unique_ptr<Iterator> it(db->NewIterator(ReadOptions(), cfh1));
+
+    it->SeekToFirst();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key1");
+    WideColumns expected1{{kDefaultWideColumnName, "quux"}, {"hello", "world"}};
+    ASSERT_EQ(it->columns(), expected1);
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key2");
+    ASSERT_EQ(it->value(), "quux");
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key3");
+    WideColumns expected3{{"1", "2"}};
+    ASSERT_EQ(it->columns(), expected3);
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  {
+    // Read the raw secondary index entries from CF2
+    std::unique_ptr<Iterator> it(db->NewIterator(ReadOptions(), cfh2));
+
+    it->SeekToFirst();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "\4quuxkey1");
+    ASSERT_TRUE(it->value().empty());
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "\4quuxkey2");
+    ASSERT_TRUE(it->value().empty());
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  {
+    // Query the secondary index
+    std::unique_ptr<Iterator> underlying_it(
+        db->NewIterator(ReadOptions(), cfh2));
+    auto it = std::make_unique<SecondaryIndexIterator>(
+        index.get(), std::move(underlying_it));
+
+    it->Seek("quux");
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "key1");
+    ASSERT_TRUE(it->value().empty());
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "key2");
+    ASSERT_TRUE(it->value().empty());
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  // Delete/SingleDelete "key1" and "key3" via an explicit transaction and
+  // "key2" and a non-existing "key4" via the DB interface (i.e. an implicit
+  // transaction)
+  {
+    std::unique_ptr<Transaction> txn(db->BeginTransaction(WriteOptions()));
+
+    ASSERT_OK(txn->Delete(cfh1, "key1"));
+    ASSERT_OK(txn->SingleDelete(cfh1, "key3"));
+
+    ASSERT_OK(txn->Commit());
+  }
+
+  ASSERT_OK(db->SingleDelete(WriteOptions(), cfh1, "key2"));
+  ASSERT_OK(db->Delete(WriteOptions(), cfh1, "key4"));
+
+  // cfh1 and cfh2 are expected to be empty
+  {
+    std::unique_ptr<Iterator> it(db->NewIterator(ReadOptions(), cfh1));
+
+    it->SeekToFirst();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  {
+    std::unique_ptr<Iterator> it(db->NewIterator(ReadOptions(), cfh2));
+
+    it->SeekToFirst();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+}
+
+TEST_P(TransactionTest, SecondaryIndexPutEntity) {
+  const TxnDBWritePolicy write_policy = std::get<2>(GetParam());
+  if (write_policy != TxnDBWritePolicy::WRITE_COMMITTED) {
+    ROCKSDB_GTEST_BYPASS("Test only WriteCommitted for now");
+    return;
+  }
+
+  // A kind of silly secondary index that indexes the column "foo".
+  class FooSecondaryIndex : public SecondaryIndex {
+   public:
+    void SetPrimaryColumnFamily(ColumnFamilyHandle* cfh) override {
+      primary_cfh_ = cfh;
+    }
+
+    void SetSecondaryColumnFamily(ColumnFamilyHandle* cfh) override {
+      secondary_cfh_ = cfh;
+    }
+
+    ColumnFamilyHandle* GetPrimaryColumnFamily() const override {
+      return primary_cfh_;
+    }
+
+    ColumnFamilyHandle* GetSecondaryColumnFamily() const override {
+      return secondary_cfh_;
+    }
+
+    Slice GetPrimaryColumnName() const override { return "foo"; }
+
+    Status UpdatePrimaryColumnValue(
+        const Slice& /* primary_key */, const Slice& primary_column_value,
+        std::optional<std::variant<Slice, std::string>>* updated_column_value)
+        const override {
+      assert(updated_column_value);
+
+      if (primary_column_value == "bar") {
+        return Status::InvalidArgument();
+      }
+
+      if (primary_column_value == "baz") {
+        updated_column_value->emplace(Slice("quux"));
+      }
+
+      return Status::OK();
+    }
+
+    Status GetSecondaryKeyPrefix(
+        const Slice& /* primary_key */, const Slice& primary_column_value,
+        std::variant<Slice, std::string>* secondary_key_prefix) const override {
+      assert(secondary_key_prefix);
+
+      if (primary_column_value.empty()) {
+        return Status::NotFound();
+      }
+
+      *secondary_key_prefix = Slice(
+          primary_column_value.data() + primary_column_value.size() - 1, 1);
+
+      return Status::OK();
+    }
+
+    Status FinalizeSecondaryKeyPrefix(
+        std::variant<Slice, std::string>* secondary_key_prefix) const override {
+      if (SecondaryIndexHelper::AsSlice(*secondary_key_prefix) == "!") {
+        return Status::Corruption();
+      }
+
+      return Status::OK();
+    }
+
+    Status GetSecondaryValue(const Slice& /* primary_key */,
+                             const Slice& primary_column_value,
+                             const Slice& previous_column_value,
+                             std::optional<std::variant<Slice, std::string>>*
+                                 secondary_value) const override {
+      if (primary_column_value == "corge") {
+        return Status::NotSupported();
+      }
+
+      std::string value = previous_column_value.ToString();
+      std::reverse(value.begin(), value.end());
+      *secondary_value = value;
+
+      return Status::OK();
+    }
+
+   private:
+    ColumnFamilyHandle* primary_cfh_{};
+    ColumnFamilyHandle* secondary_cfh_{};
+  };
+
+  txn_db_options.secondary_indices.emplace_back(
+      std::make_shared<FooSecondaryIndex>());
+
+  ASSERT_OK(ReOpen());
+
+  ColumnFamilyOptions cf1_opts;
+  ColumnFamilyHandle* cfh1 = nullptr;
+  ASSERT_OK(db->CreateColumnFamily(cf1_opts, "cf1", &cfh1));
+  std::unique_ptr<ColumnFamilyHandle> cfh1_guard(cfh1);
+
+  ColumnFamilyOptions cf2_opts;
+  ColumnFamilyHandle* cfh2 = nullptr;
+  ASSERT_OK(db->CreateColumnFamily(cf2_opts, "cf2", &cfh2));
+  std::unique_ptr<ColumnFamilyHandle> cfh2_guard(cfh2);
+
+  auto& index = txn_db_options.secondary_indices.back();
+  index->SetPrimaryColumnFamily(cfh1);
+  index->SetSecondaryColumnFamily(cfh2);
+
+  {
+    std::unique_ptr<Transaction> txn(db->BeginTransaction(WriteOptions()));
+
+    // Default CF => OK but not indexed
+    ASSERT_OK(txn->PutEntity(db->DefaultColumnFamily(), "key0",
+                             {{"a", "b"}, {"foo", "c"}}));
+
+    // CF1 but no "foo" column => OK but not indexed
+    ASSERT_OK(txn->PutEntity(cfh1, "key1", {{"hello", "world"}}));
+
+    // CF1, "bar" in the "foo" column => UpdatePrimaryColumnValue errors out
+    ASSERT_TRUE(
+        txn->PutEntity(cfh1, "key2", {{"foo", "bar"}}).IsInvalidArgument());
+
+    // CF1, "baz" in the "foo" column => updated to "quux", OK and indexed
+    ASSERT_OK(txn->PutEntity(cfh1, "key3", {{"foo", "baz"}, {"x", "y"}}));
+
+    // CF1, "quux" in the "foo" column => OK and indexed
+    ASSERT_OK(txn->PutEntity(cfh1, "key4", {{"foo", "quux"}, {"1", "2"}}));
+
+    // CF1, empty value in the "foo" column => GetSecondaryKeyPrefix errors out
+    ASSERT_TRUE(txn->PutEntity(cfh1, "key5", {{"foo", ""}}).IsNotFound());
+
+    // CF1, "!!!" in the "foo" column => FinalizeSecondaryKeyPrefix errors out
+    ASSERT_TRUE(txn->PutEntity(cfh1, "key6", {{"foo", "!!!"}}).IsCorruption());
+
+    // CF1, "corge" in the "foo" column => GetSecondaryValue errors out
+    ASSERT_TRUE(
+        txn->PutEntity(cfh1, "key7", {{"foo", "corge"}}).IsNotSupported());
+
+    ASSERT_OK(txn->Commit());
+  }
+
+  // Expected keys: "key0" in the default CF; "key1", "key3", "key4" in CF1;
+  // secondary index entries for "key3" and "key4" in CF2
+  {
+    std::unique_ptr<Iterator> it(
+        db->NewIterator(ReadOptions(), db->DefaultColumnFamily()));
+
+    it->SeekToFirst();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key0");
+    WideColumns expected0{{"a", "b"}, {"foo", "c"}};
+    ASSERT_EQ(it->columns(), expected0);
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  {
+    std::unique_ptr<Iterator> it(db->NewIterator(ReadOptions(), cfh1));
+
+    it->SeekToFirst();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key1");
+    WideColumns expected1{{"hello", "world"}};
+    ASSERT_EQ(it->columns(), expected1);
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key3");
+    WideColumns expected3{{"foo", "quux"}, {"x", "y"}};
+    ASSERT_EQ(it->columns(), expected3);
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key4");
+    WideColumns expected4{{"1", "2"}, {"foo", "quux"}};
+    ASSERT_EQ(it->columns(), expected4);
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  {
+    // Read the raw secondary index entries from CF2
+    std::unique_ptr<Iterator> it(db->NewIterator(ReadOptions(), cfh2));
+
+    it->SeekToFirst();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "xkey3");
+    ASSERT_EQ(it->value(), "zab");
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "xkey4");
+    ASSERT_EQ(it->value(), "xuuq");
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  {
+    // Query the secondary index
+    std::unique_ptr<Iterator> underlying_it(
+        db->NewIterator(ReadOptions(), cfh2));
+    auto it = std::make_unique<SecondaryIndexIterator>(
+        index.get(), std::move(underlying_it));
+
+    it->Seek("x");
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "key3");
+    ASSERT_EQ(it->value(), "zab");
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "key4");
+    ASSERT_EQ(it->value(), "xuuq");
+
+    it->Prev();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "key3");
+    ASSERT_EQ(it->value(), "zab");
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "key4");
+    ASSERT_EQ(it->value(), "xuuq");
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+
+    it->Seek("y");
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  // Make some updates to the key-values indexed above through the database
+  // interface (i.e. using implicit transactions)
+
+  // Add a "foo" column to "key1" which previously had none
+  ASSERT_OK(db->PutEntity(WriteOptions(), cfh1, "key1",
+                          {{"hello", "world"}, {"foo", "grault"}}));
+
+  // Change the value of the "foo" column in "key3"
+  ASSERT_OK(db->PutEntity(WriteOptions(), cfh1, "key3",
+                          {{"foo", "garply"}, {"x", "y"}}));
+
+  // Remove the "foo" column from "key4"
+  ASSERT_OK(db->PutEntity(WriteOptions(), cfh1, "key4", {{"1", "2"}}));
+
+  // Expected keys: "key0" in the default CF; "key1", "key3", "key4" in CF1;
+  // secondary index entries for "key1" and "key3" in CF2
+  {
+    std::unique_ptr<Iterator> it(
+        db->NewIterator(ReadOptions(), db->DefaultColumnFamily()));
+
+    it->SeekToFirst();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key0");
+    WideColumns expected0{{"a", "b"}, {"foo", "c"}};
+    ASSERT_EQ(it->columns(), expected0);
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  {
+    std::unique_ptr<Iterator> it(db->NewIterator(ReadOptions(), cfh1));
+
+    it->SeekToFirst();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key1");
+    WideColumns expected1{{"foo", "grault"}, {"hello", "world"}};
+    ASSERT_EQ(it->columns(), expected1);
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key3");
+    WideColumns expected3{{"foo", "garply"}, {"x", "y"}};
+    ASSERT_EQ(it->columns(), expected3);
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "key4");
+    WideColumns expected4{{"1", "2"}};
+    ASSERT_EQ(it->columns(), expected4);
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  {
+    // Read the raw secondary index entries from CF2
+    std::unique_ptr<Iterator> it(db->NewIterator(ReadOptions(), cfh2));
+
+    it->SeekToFirst();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "tkey1");
+    ASSERT_EQ(it->value(), "tluarg");
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), "ykey3");
+    ASSERT_EQ(it->value(), "ylprag");
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+
+  {
+    // Query the secondary index
+    std::unique_ptr<Iterator> underlying_it(
+        db->NewIterator(ReadOptions(), cfh2));
+    auto it = std::make_unique<SecondaryIndexIterator>(
+        index.get(), std::move(underlying_it));
+
+    it->Seek("t");
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "key1");
+    ASSERT_EQ(it->value(), "tluarg");
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+
+    it->Seek("y");
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "key3");
+    ASSERT_EQ(it->value(), "ylprag");
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+}
+
+TEST_P(TransactionTest, SecondaryIndexOnKey) {
+  const TxnDBWritePolicy write_policy = std::get<2>(GetParam());
+  if (write_policy != TxnDBWritePolicy::WRITE_COMMITTED) {
+    ROCKSDB_GTEST_BYPASS("Test only WriteCommitted for now");
+    return;
+  }
+
+  // A secondary index that removes the first three characters of the primary
+  // key and indexes the rest.
+  class KeySecondaryIndex : public SecondaryIndex {
+   public:
+    void SetPrimaryColumnFamily(ColumnFamilyHandle* cfh) override {
+      primary_cfh_ = cfh;
+    }
+
+    void SetSecondaryColumnFamily(ColumnFamilyHandle* cfh) override {
+      secondary_cfh_ = cfh;
+    }
+
+    ColumnFamilyHandle* GetPrimaryColumnFamily() const override {
+      return primary_cfh_;
+    }
+
+    ColumnFamilyHandle* GetSecondaryColumnFamily() const override {
+      return secondary_cfh_;
+    }
+
+    Slice GetPrimaryColumnName() const override {
+      return kDefaultWideColumnName;
+    }
+
+    Status UpdatePrimaryColumnValue(
+        const Slice& /* primary_key */, const Slice& /* primary_column_value */,
+        std::optional<
+            std::variant<Slice, std::string>>* /* updated_column_value */)
+        const override {
+      return Status::OK();
+    }
+
+    Status GetSecondaryKeyPrefix(
+        const Slice& primary_key, const Slice& /* primary_column_value */,
+        std::variant<Slice, std::string>* secondary_key_prefix) const override {
+      assert(secondary_key_prefix);
+
+      constexpr size_t prefix_len = 3;
+
+      if (primary_key.size() < prefix_len) {
+        return Status::InvalidArgument();
+      }
+
+      Slice transformed_key = primary_key;
+      transformed_key.remove_prefix(prefix_len);
+
+      *secondary_key_prefix = transformed_key;
+
+      return Status::OK();
+    }
+
+    Status FinalizeSecondaryKeyPrefix(
+        std::variant<Slice, std::string>* /* secondary_key_prefix */)
+        const override {
+      return Status::OK();
+    }
+
+    Status GetSecondaryValue(const Slice& primary_key,
+                             const Slice& /* primary_column_value */,
+                             const Slice& /* previous_column_value */,
+                             std::optional<std::variant<Slice, std::string>>*
+                                 secondary_value) const override {
+      assert(secondary_value);
+
+      std::string index_value = primary_key.ToString();
+      std::reverse(index_value.begin(), index_value.end());
+
+      *secondary_value = std::move(index_value);
+
+      return Status::OK();
+    }
+
+   private:
+    ColumnFamilyHandle* primary_cfh_{};
+    ColumnFamilyHandle* secondary_cfh_{};
+  };
+
+  txn_db_options.secondary_indices.emplace_back(
+      std::make_shared<KeySecondaryIndex>());
+
+  ASSERT_OK(ReOpen());
+
+  ColumnFamilyOptions cf1_opts;
+  ColumnFamilyHandle* cfh1 = nullptr;
+  ASSERT_OK(db->CreateColumnFamily(cf1_opts, "cf1", &cfh1));
+  std::unique_ptr<ColumnFamilyHandle> cfh1_guard(cfh1);
+
+  ColumnFamilyOptions cf2_opts;
+  ColumnFamilyHandle* cfh2 = nullptr;
+  ASSERT_OK(db->CreateColumnFamily(cf2_opts, "cf2", &cfh2));
+  std::unique_ptr<ColumnFamilyHandle> cfh2_guard(cfh2);
+
+  auto& index = txn_db_options.secondary_indices.back();
+  index->SetPrimaryColumnFamily(cfh1);
+  index->SetSecondaryColumnFamily(cfh2);
+
+  {
+    std::unique_ptr<Transaction> txn(db->BeginTransaction(WriteOptions()));
+
+    ASSERT_OK(txn->Put(cfh1, "123foo", "a"));
+    ASSERT_OK(txn->Put(cfh1, "123bar", "b"));
+    ASSERT_OK(txn->Put(cfh1, "123baz", "c"));
+    ASSERT_OK(txn->Put(cfh1, "456foo", "d"));
+    ASSERT_OK(txn->Put(cfh1, "456bar", "e"));
+    ASSERT_OK(txn->Put(cfh1, "456baz", "f"));
+    ASSERT_OK(txn->Put(cfh1, "789foo", "g"));
+    ASSERT_OK(txn->Put(cfh1, "789bar", "h"));
+    ASSERT_OK(txn->Put(cfh1, "789baz", "i"));
+
+    ASSERT_OK(txn->Commit());
+  }
+
+  {
+    std::unique_ptr<Iterator> underlying_it(
+        db->NewIterator(ReadOptions(), cfh2));
+    auto it = std::make_unique<SecondaryIndexIterator>(
+        index.get(), std::move(underlying_it));
+
+    it->Seek("foo");
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "123foo");
+    ASSERT_EQ(it->value(), "oof321");
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "456foo");
+    ASSERT_EQ(it->value(), "oof654");
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "789foo");
+    ASSERT_EQ(it->value(), "oof987");
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+
+    it->Seek("bar");
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "123bar");
+    ASSERT_EQ(it->value(), "rab321");
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "456bar");
+    ASSERT_EQ(it->value(), "rab654");
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "789bar");
+    ASSERT_EQ(it->value(), "rab987");
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+
+    it->Seek("baz");
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "123baz");
+    ASSERT_EQ(it->value(), "zab321");
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "456baz");
+    ASSERT_EQ(it->value(), "zab654");
+
+    it->Next();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_OK(it->status());
+    ASSERT_EQ(it->key(), "789baz");
+    ASSERT_EQ(it->value(), "zab987");
+
+    it->Next();
+    ASSERT_FALSE(it->Valid());
+    ASSERT_OK(it->status());
+  }
+}
+
 TEST_F(TransactionDBTest, CollapseKey) {
   ASSERT_OK(ReOpen());
   ASSERT_OK(db->Put({}, "hello", "world"));
@@ -7826,6 +8911,787 @@ TEST_F(TransactionDBTest, FlushedLogWithPendingPrepareIsSynced) {
   }
 }
 
+class CommitBypassMemtableTest : public DBTestBase,
+                                 public ::testing::WithParamInterface<bool> {
+ public:
+  CommitBypassMemtableTest() : DBTestBase("commit_bypass_memtable_test", true) {
+    SetUpTransactionDB();
+  }
+
+ protected:
+  TransactionDB* txn_db = nullptr;
+  Options options;
+  TransactionDBOptions txn_db_opts;
+
+  void SetUpTransactionDB(
+      uint32_t threshold = std::numeric_limits<uint32_t>::max(),
+      bool atomic_flush = false) {
+    options = CurrentOptions();
+    options.create_if_missing = true;
+    options.allow_2pc = true;
+    options.two_write_queues = GetParam();
+    // Avoid write stall
+    options.max_write_buffer_number = 8;
+    options.atomic_flush = atomic_flush;
+    // Destroy the DB to recreate as a TransactionDB.
+    Close();
+    Destroy(options, true);
+
+    txn_db_opts.write_policy = TxnDBWritePolicy::WRITE_COMMITTED;
+    txn_db_opts.txn_commit_bypass_memtable_threshold = threshold;
+    ASSERT_OK(TransactionDB::Open(options, txn_db_opts, dbname_, &txn_db));
+    ASSERT_NE(txn_db, nullptr);
+    db_ = txn_db;
+  }
+};
+
+INSTANTIATE_TEST_CASE_P(, CommitBypassMemtableTest, testing::Bool());
+
+// TODO: parameterize other tests in the file with commit_bypass_memtable
+TEST_P(CommitBypassMemtableTest, SingleCFUpdate) {
+  // 10000 updates for one CF in a single transaction.
+  // Tests basic read before and after flush, with and w/o snapshot.
+  for (bool disable_flush : {false, true}) {
+    SetUpTransactionDB();
+    if (disable_flush) {
+      ASSERT_OK(db_->PauseBackgroundWork());
+    }
+
+    WriteOptions wopts;
+    std::unordered_set<std::string> not_found_at_snapshot;
+    std::map<std::string, std::string> snapshot_map;
+    std::map<std::string, std::string> expected_map;
+
+    for (int i = 0; i < 10000; i += 3) {
+      ASSERT_OK(db_->Put(wopts, Key(i), "foo"));
+      not_found_at_snapshot.insert(Key(i + 1));
+      snapshot_map[Key(i)] = "foo";
+    }
+    const Snapshot* snapshot = db_->GetSnapshot();
+
+    TransactionOptions txn_opts;
+    txn_opts.commit_bypass_memtable = true;
+    Transaction* txn1 = txn_db->BeginTransaction(wopts, txn_opts, nullptr);
+    std::unordered_set<std::string> expected_not_found;
+    for (int i = 0; i < 10000; i += 2) {
+      std::string v = "val" + std::to_string(i);
+      ASSERT_OK(txn1->Put(Key(i), v));
+      expected_map[Key(i)] = v;
+      ASSERT_OK(txn1->Delete(Key(i + 1)));
+      expected_not_found.insert(Key(i + 1));
+    }
+    ASSERT_OK(txn1->SetName("xid1"));
+    ASSERT_OK(txn1->Prepare());
+    ASSERT_OK(txn1->Commit());
+    delete txn1;
+
+    ReadOptions ro_snapshot;
+    ro_snapshot.snapshot = snapshot;
+    // Verify at snapshot
+    VerifyDBFromMap(snapshot_map, nullptr, false, &ro_snapshot, nullptr,
+                    &not_found_at_snapshot);
+    // Verify latest state
+    VerifyDBFromMap(expected_map, nullptr, false, nullptr, nullptr,
+                    &expected_not_found);
+
+    db_->ReleaseSnapshot(snapshot);
+    if (disable_flush) {
+      ASSERT_OK(db_->ContinueBackgroundWork());
+    }
+    ASSERT_OK(db_->Flush({}));
+    VerifyDBFromMap(expected_map, nullptr, false, nullptr, nullptr,
+                    &expected_not_found);
+  }
+}
+
+TEST_P(CommitBypassMemtableTest, SingleCFUpdateWithOverWrite) {
+  // Test the case where DB has base data and there are overwrites
+  // over the data in WBWI for one CF.
+  //
+  // live mem has k2
+  // ingested wbwi has k2 del k4, del k5, k6
+  // older imm mem has k3, k4, k5, k6
+  // SST has k1, k2, k4 (if not using single del)
+  for (bool single_del : {false, true}) {
+    SCOPED_TRACE("use single_del " + std::to_string(single_del));
+    for (bool disable_flush : {false, true}) {
+      SCOPED_TRACE("disable_flush: " + std::to_string(disable_flush));
+      SetUpTransactionDB();
+
+      std::map<std::string, std::string> expected = {{"k1", "sst"},
+                                                     {"k2", "sst"}};
+      WriteOptions wopts;
+      ASSERT_OK(txn_db->Put(wopts, "k1", "sst"));
+      ASSERT_OK(txn_db->Put(wopts, "k2", "sst"));
+      if (!single_del) {
+        // single del does not allow overwrite. We write to this key below.
+        ASSERT_OK(txn_db->Put(wopts, "k4", "sst"));
+        expected["k4"] = "sst";
+      }
+      ASSERT_OK(txn_db->Flush({}));
+      std::unordered_set<std::string> not_found;
+      VerifyDBFromMap(expected, nullptr, false, nullptr, nullptr, &not_found);
+
+      if (disable_flush) {
+        ASSERT_OK(db_->PauseBackgroundWork());
+      }
+
+      // immutable mem
+      TransactionOptions topts;
+      Transaction* txn = txn_db->BeginTransaction(wopts, topts);
+      ASSERT_OK(txn->Put("k3", "imm"));
+      ASSERT_OK(txn->Put("k4", "imm"));
+      ASSERT_OK(txn->Put("k5", "imm"));
+      ASSERT_OK(txn->Put("k6", "imm"));
+      ASSERT_OK(txn->SetName("xid1"));
+      ASSERT_OK(txn->Prepare());
+      ASSERT_OK(txn->Commit());
+      auto dbimpl = static_cast_with_check<DBImpl>(txn_db->GetRootDB());
+      ASSERT_OK(dbimpl->TEST_SwitchMemtable());
+      for (const auto k : {"k3", "k4", "k5", "k6"}) {
+        expected[k] = "imm";
+      }
+      VerifyDBFromMap(expected, nullptr, false, nullptr, nullptr, &not_found);
+
+      uint64_t num_imm_mems;
+      if (disable_flush) {
+        ASSERT_TRUE(txn_db->GetIntProperty(
+            DB::Properties::kNumImmutableMemTable, &num_imm_mems));
+        ASSERT_EQ(num_imm_mems, 1);
+      }
+
+      // ingest wbwi
+      const Snapshot* snapshot = txn_db->GetSnapshot();
+      TransactionOptions topts_ingest;
+      topts_ingest.commit_bypass_memtable = true;
+      // reuse txn1
+      txn = txn_db->BeginTransaction(wopts, topts_ingest, txn);
+      ASSERT_OK(txn->Put("k2", "wbwi"));
+      if (single_del) {
+        ASSERT_OK(txn->SingleDelete("k4"));
+        ASSERT_OK(txn->SingleDelete("k5"));
+      } else {
+        ASSERT_OK(txn->Delete("k4"));
+        ASSERT_OK(txn->Delete("k5"));
+      }
+      ASSERT_OK(txn->Put("k6", "wbwi"));
+      ASSERT_OK(txn->SetName("xid2"));
+      ASSERT_OK(txn->Prepare());
+      VerifyDBFromMap(expected, nullptr, false, nullptr, nullptr, &not_found);
+
+      ASSERT_OK(txn->Commit());
+      if (disable_flush) {
+        ASSERT_TRUE(txn_db->GetIntProperty(
+            DB::Properties::kNumImmutableMemTable, &num_imm_mems));
+        // During Commit(), current empty memtable becomes a new immutable
+        // memtable. 3 here includes wbwi for this transaction, the empty
+        // immutable memtable, and the immutable memtable created
+        // by TEST_SwitchMemtable() above.
+        ASSERT_EQ(num_imm_mems, 3);
+      }
+
+      ReadOptions ro_snapshot;
+      ro_snapshot.snapshot = snapshot;
+      auto expected_at_snapshot = expected;
+      auto not_found_at_snapshot = not_found;
+      VerifyDBFromMap(expected, nullptr, false, &ro_snapshot, nullptr,
+                      &not_found);
+      not_found = {"k4", "k5"};
+      expected.erase("k4");
+      expected.erase("k5");
+      expected["k2"] = "wbwi";
+      expected["k6"] = "wbwi";
+      VerifyDBFromMap(expected, nullptr, false, nullptr, nullptr, &not_found);
+
+      // live mem
+      txn = txn_db->BeginTransaction(wopts, topts, txn);
+      ASSERT_OK(txn->Put("k2", "live_mem"));
+      ASSERT_OK(txn->SetName("xid3"));
+      ASSERT_OK(txn->Prepare());
+      ASSERT_OK(txn->Commit());
+      delete txn;
+      expected["k2"] = "live_mem";
+      VerifyDBFromMap(expected, nullptr, false, nullptr, nullptr, &not_found);
+
+      if (disable_flush) {
+        ASSERT_OK(db_->ContinueBackgroundWork());
+        ASSERT_OK(db_->Flush({}));
+      } else {
+        ASSERT_OK(db_->WaitForCompact({}));
+      }
+      ASSERT_TRUE(txn_db->GetIntProperty(DB::Properties::kNumImmutableMemTable,
+                                         &num_imm_mems));
+      ASSERT_EQ(num_imm_mems, 0);
+
+      VerifyDBFromMap(expected, nullptr, false, nullptr, nullptr, &not_found);
+      VerifyDBFromMap(expected_at_snapshot, nullptr, false, &ro_snapshot,
+                      nullptr, &not_found_at_snapshot);
+      txn_db->ReleaseSnapshot(snapshot);
+    }
+  }
+}
+
+TEST_P(CommitBypassMemtableTest, MultiCFOverwrite) {
+  // mini-stress test multi CF update
+  const int kNumKeys = 10000;
+  for (bool disable_flush : {false, true}) {
+    SCOPED_TRACE("disable_flush: " + std::to_string(disable_flush));
+    SetUpTransactionDB();
+    if (disable_flush) {
+      ASSERT_OK(txn_db->PauseBackgroundWork());
+    }
+    std::vector<std::string> cfs = {"puppy", "kitty", "meta"};
+    CreateColumnFamilies(cfs, options);
+    ASSERT_EQ(handles_.size(), 3);
+    ASSERT_EQ(handles_[0]->GetName(), cfs[0]);
+    ASSERT_EQ(handles_[1]->GetName(), cfs[1]);
+    ASSERT_EQ(handles_[2]->GetName(), cfs[2]);
+
+    std::map<std::string, std::string> expected_cf0;
+    std::unordered_set<std::string> not_found_cf0;
+    std::map<std::string, std::string> expected_cf1;
+    std::unordered_set<std::string> not_found_cf1;
+    WriteOptions wopts;
+    Random* rnd = Random::GetTLSInstance();
+    // Some base data
+    for (int i = 0; i < kNumKeys; ++i) {
+      std::string val_cf0 = "cf0_sst" + std::to_string(i);
+      if (rnd->OneIn(2)) {
+        ASSERT_OK(txn_db->Put(wopts, handles_[0], Key(i), val_cf0));
+        expected_cf0[Key(i)] = val_cf0;
+      } else {
+        not_found_cf0.insert(Key(i));
+      }
+      std::string val_cf1 = "cf1_sst" + std::to_string(i);
+      ASSERT_OK(txn_db->Put(wopts, handles_[1], Key(i), val_cf1));
+      expected_cf1[Key(i)] = val_cf1;
+    }
+    SCOPED_TRACE("Verify after SST");
+    ASSERT_OK(txn_db->Put(wopts, handles_[2], "id", "0"));
+    std::map<std::string, std::string> expected_cf2 = {{"id", "0"}};
+    VerifyDBFromMap(expected_cf0, nullptr, false, nullptr, handles_[0],
+                    &not_found_cf0);
+    VerifyDBFromMap(expected_cf1, nullptr, false, nullptr, handles_[1],
+                    &not_found_cf1);
+
+    if (!disable_flush) {
+      ASSERT_OK(txn_db->Flush({}, handles_[0]));
+      ASSERT_OK(txn_db->Flush({}, handles_[1]));
+    }
+
+    const Snapshot* snapshot = nullptr;
+    std::map<std::string, std::string> expected_cf0_snapshot;
+    std::unordered_set<std::string> not_found_cf0_snapshot;
+    std::map<std::string, std::string> expected_cf1_snapshot;
+    std::unordered_set<std::string> not_found_cf1_snapshot;
+    std::map<std::string, std::string> expected_cf2_snapshot;
+    auto init_snapshot_states = [&]() {
+      snapshot = txn_db->GetSnapshot();
+      expected_cf0_snapshot = expected_cf0;
+      not_found_cf0_snapshot = not_found_cf0;
+      expected_cf1_snapshot = expected_cf1;
+      not_found_cf1_snapshot = not_found_cf1;
+      expected_cf2_snapshot = expected_cf2;
+    };
+    if (rnd->OneIn(4)) {
+      init_snapshot_states();
+    }
+
+    // Transaction 1
+    TransactionOptions topts;
+    topts.commit_bypass_memtable = true;
+    Transaction* txn1 = txn_db->BeginTransaction(wopts, topts);
+    auto fill_txn = [&](Transaction* txn, const std::string& v) {
+      std::vector<int> indices(kNumKeys);
+      std::iota(indices.begin(), indices.end(), 0);
+      RandomShuffle(indices.begin(), indices.end());
+      for (int i : indices) {
+        // CF0 update
+        if (rnd->OneIn(4)) {
+          std::string val_cf0 = "cf0_" + v + std::to_string(i);
+          ASSERT_OK(txn->Put(handles_[0], Key(i), val_cf0));
+          expected_cf0[Key(i)] = val_cf0;
+          not_found_cf0.erase(Key(i));
+        } else if (rnd->OneIn(4)) {
+          ASSERT_OK(txn->Delete(handles_[0], Key(i)));
+          expected_cf0.erase(Key(i));
+          not_found_cf0.insert(Key(i));
+        }
+
+        // CF1 update
+        if (rnd->OneIn(4)) {
+          ASSERT_OK(txn->SingleDelete(handles_[1], Key(i)));
+          expected_cf1.erase(Key(i));
+          not_found_cf1.insert(Key(i));
+        }
+        if (rnd->OneIn(4) &&
+            not_found_cf1.find(Key(i)) != not_found_cf1.end()) {
+          // Can not overwrite when using SD.
+          std::string val_cf1 = "cf1_" + v + std::to_string(i);
+          ASSERT_OK(txn->Put(handles_[1], Key(i), val_cf1));
+          expected_cf1[Key(i)] = val_cf1;
+          not_found_cf1.erase(Key(i));
+        }
+      }
+    };
+    fill_txn(txn1, "txn1");
+    ASSERT_OK(txn1->SetName("xid1"));
+    ASSERT_OK(txn1->Prepare());
+    if (rnd->OneIn(2)) {
+      ASSERT_OK(txn1->GetCommitTimeWriteBatch()->Put(handles_[2], "id", "1"));
+      expected_cf2["id"] = "1";
+    }
+    ASSERT_OK(txn1->Commit());
+    delete txn1;
+
+    uint64_t num_imm_mems = 0;
+    if (disable_flush) {
+      ASSERT_TRUE(txn_db->GetIntProperty(
+          handles_[0], DB::Properties::kNumImmutableMemTable, &num_imm_mems));
+      ASSERT_EQ(num_imm_mems, 2);
+
+      ASSERT_TRUE(txn_db->GetIntProperty(
+          handles_[1], DB::Properties::kNumImmutableMemTable, &num_imm_mems));
+      ASSERT_EQ(num_imm_mems, 2);
+      ASSERT_TRUE(txn_db->GetIntProperty(
+          handles_[2], DB::Properties::kNumImmutableMemTable, &num_imm_mems));
+      ASSERT_EQ(num_imm_mems, 0);
+    }
+    SCOPED_TRACE("Verify cf0 after txn1");
+    VerifyDBFromMap(expected_cf0, nullptr, false, nullptr, handles_[0],
+                    &not_found_cf0);
+    SCOPED_TRACE("Verify cf1 after txn1");
+    SCOPED_TRACE("db is " + txn_db->GetName());
+    VerifyDBFromMap(expected_cf1, nullptr, false, nullptr, handles_[1],
+                    &not_found_cf1);
+    VerifyDBFromMap(expected_cf2, nullptr, false, nullptr, handles_[2]);
+    auto verify_at_snapshot = [&](const std::string& m) {
+      if (snapshot) {
+        SCOPED_TRACE("Verify at snapshot " + m);
+        ReadOptions ro;
+        ro.snapshot = snapshot;
+        SCOPED_TRACE("Verify cf0 after txn1");
+        VerifyDBFromMap(expected_cf0_snapshot, nullptr, false, &ro, handles_[0],
+                        &not_found_cf0_snapshot);
+        SCOPED_TRACE("Verify cf1 after txn1");
+        VerifyDBFromMap(expected_cf1_snapshot, nullptr, false, &ro, handles_[1],
+                        &not_found_cf1_snapshot);
+        VerifyDBFromMap(expected_cf2_snapshot, nullptr, false, &ro,
+                        handles_[2]);
+        if (rnd->OneIn(2)) {
+          txn_db->ReleaseSnapshot(snapshot);
+          snapshot = nullptr;
+        }
+      }
+    };
+    verify_at_snapshot("txn1");
+    if (!snapshot && rnd->OneIn(4)) {
+      init_snapshot_states();
+    }
+
+    // Live memtable or another transaction with commit_bypass_memtable
+    TransactionOptions topts2;
+    topts2.commit_bypass_memtable = rnd->OneIn(2);
+    SCOPED_TRACE("txn2 commit_bypass_memtable = " +
+                 std::to_string(topts2.commit_bypass_memtable));
+    Transaction* txn2 = txn_db->BeginTransaction(wopts, topts2);
+    fill_txn(txn2, "txn2");
+    ASSERT_OK(txn2->SetName("xid2"));
+    ASSERT_OK(txn2->Prepare());
+    if (rnd->OneIn(2)) {
+      ASSERT_OK(txn2->GetCommitTimeWriteBatch()->Put(handles_[2], "id", "2"));
+      expected_cf2["id"] = "2";
+    }
+    ASSERT_OK(txn2->Commit());
+    delete txn2;
+    if (disable_flush) {
+      ASSERT_TRUE(txn_db->GetIntProperty(
+          handles_[0], DB::Properties::kNumImmutableMemTable, &num_imm_mems));
+      ASSERT_EQ(num_imm_mems, topts2.commit_bypass_memtable ? 4 : 2);
+
+      ASSERT_TRUE(txn_db->GetIntProperty(
+          handles_[1], DB::Properties::kNumImmutableMemTable, &num_imm_mems));
+      ASSERT_EQ(num_imm_mems, topts2.commit_bypass_memtable ? 4 : 2);
+      ASSERT_TRUE(txn_db->GetIntProperty(
+          handles_[2], DB::Properties::kNumImmutableMemTable, &num_imm_mems));
+      ASSERT_EQ(num_imm_mems, 0);
+    }
+
+    SCOPED_TRACE("Verify cf0 after txn2");
+    VerifyDBFromMap(expected_cf0, nullptr, false, nullptr, handles_[0],
+                    &not_found_cf0);
+    SCOPED_TRACE("Verify cf1 after txn2");
+    VerifyDBFromMap(expected_cf1, nullptr, false, nullptr, handles_[1],
+                    &not_found_cf1);
+    // cf2 should not have keys in not_found_cf1 either
+    VerifyDBFromMap(expected_cf2, nullptr, false, nullptr, handles_[2],
+                    &not_found_cf1);
+    verify_at_snapshot("txn2");
+    if (!snapshot && rnd->OneIn(4)) {
+      init_snapshot_states();
+    }
+
+    // Verify all data is flushed
+    if (disable_flush) {
+      ASSERT_OK(db_->ContinueBackgroundWork());
+      ASSERT_OK(db_->Flush({}, handles_[0]));
+      ASSERT_OK(db_->Flush({}, handles_[1]));
+    } else {
+      ASSERT_OK(db_->WaitForCompact({}));
+    }
+
+    VerifyDBFromMap(expected_cf0, nullptr, false, nullptr, handles_[0],
+                    &not_found_cf0);
+    VerifyDBFromMap(expected_cf1, nullptr, false, nullptr, handles_[1],
+                    &not_found_cf1);
+    VerifyDBFromMap(expected_cf2, nullptr, false, nullptr, handles_[2],
+                    &not_found_cf1);
+    verify_at_snapshot("flush");
+    if (snapshot) {
+      db_->ReleaseSnapshot(snapshot);
+    }
+  }
+}
+
+TEST_P(CommitBypassMemtableTest, Recovery) {
+  // Test that ingested txn can be recovered.
+  // Implementation detail: this tests that write path reserves enough sequence
+  // number for the ingested memtables (see seq_inc in WriteImpl()). For
+  // example, suppose that we only assign one sequence number per ingested
+  // memtable. Then txn1 will be assigned seqno 1 and txn2 will be assigned 2.
+  // During recovery, we will not use memtable ingestion and will fall back
+  // to memtable insertion. The sequence number for the first key in a
+  // transaction is the commit sequence number. So for txn1, we will insert into
+  // memtable k2@1 and k1@2. And for txn2, we will insert k1@2 and k2@3. This
+  // results in duplicated key@seqno.
+  WriteOptions wopts;
+  TransactionOptions txn_opts;
+  txn_opts.commit_bypass_memtable = true;
+  Transaction* txn1 = txn_db->BeginTransaction(wopts, txn_opts, nullptr);
+  ASSERT_OK(txn1->SetName("xid1"));
+  ASSERT_OK(txn1->Put("k2", "v2"));
+  ASSERT_OK(txn1->Put("k1", "v1"));
+  ASSERT_OK(txn1->Prepare());
+  ASSERT_OK(txn1->Commit());
+
+  // Test txn reuse code path
+  txn1 = txn_db->BeginTransaction(wopts, txn_opts, txn1);
+  ASSERT_OK(txn1->SetName("xid2"));
+  ASSERT_OK(txn1->Put("k1", "v3"));
+  ASSERT_OK(txn1->Put("k2", "v4"));
+  ASSERT_OK(txn1->Prepare());
+  ASSERT_OK(txn1->Commit());
+  delete txn1;
+
+  std::map<std::string, std::string> expected = {{"k1", "v3"}, {"k2", "v4"}};
+  VerifyDBFromMap(expected);
+
+  ASSERT_OK(txn_db->Close());
+  delete txn_db;
+  ASSERT_OK(TransactionDB::Open(options, txn_db_opts, dbname_, &txn_db));
+  db_ = txn_db;
+
+  VerifyDBFromMap(expected);
+}
+
+TEST_P(CommitBypassMemtableTest, ThresholdTxnDBOption) {
+  // Tests TransactionDBOptions::txn_commit_bypass_memtable_threshold
+  const uint32_t threshold = 10;
+  SetUpTransactionDB(/*threshold=*/threshold);
+  bool commit_bypass_memtable = false;
+  // TODO: add and use stats for this
+  SyncPoint::GetInstance()->SetCallBack(
+      "WriteCommittedTxn::CommitInternal:bypass_memtable",
+      [&](void* arg) { commit_bypass_memtable = *(static_cast<bool*>(arg)); });
+  SyncPoint::GetInstance()->EnableProcessing();
+
+  // TransactionOptions::commit_bypass_memtable takes precedence
+  WriteOptions wopts;
+  TransactionOptions txn_opts;
+  txn_opts.commit_bypass_memtable = true;
+  Transaction* txn1 = txn_db->BeginTransaction(wopts, txn_opts, nullptr);
+  ASSERT_OK(txn1->SetName("xid1"));
+  ASSERT_OK(txn1->Put("k2", "v2"));
+  ASSERT_OK(txn1->Put("k1", "v1"));
+  ASSERT_OK(txn1->Prepare());
+  ASSERT_OK(txn1->Commit());
+  ASSERT_TRUE(commit_bypass_memtable);
+
+  // Below threshold
+  for (auto num_ops : {threshold, threshold + 1}) {
+    commit_bypass_memtable = false;
+    txn_opts.commit_bypass_memtable = false;
+    auto txn = txn_db->BeginTransaction(wopts, txn_opts, txn1);
+    txn1 = nullptr;
+    ASSERT_OK(txn->SetName("xid" + std::to_string(num_ops)));
+    for (uint32_t i = 0; i < num_ops; ++i) {
+      ASSERT_OK(
+          txn->Put("key" + std::to_string(i), "value" + std::to_string(i)));
+    }
+    ASSERT_OK(txn->Prepare());
+    ASSERT_OK(txn->Commit());
+    ASSERT_EQ(commit_bypass_memtable, num_ops > threshold);
+    delete txn;
+  }
+
+  // Repeat the same test with updates to two CFs
+  std::vector<std::string> cfs = {"pk", "sk"};
+  CreateColumnFamilies(cfs, options);
+
+  // Below threshold
+  for (auto num_ops : {threshold, threshold + 1}) {
+    commit_bypass_memtable = false;
+    txn_opts.commit_bypass_memtable = false;
+    auto txn_cf = txn_db->BeginTransaction(wopts, txn_opts, nullptr);
+    ASSERT_OK(txn_cf->SetName("xid_cf" + std::to_string(num_ops)));
+    for (uint32_t i = 0; i < num_ops; ++i) {
+      ASSERT_OK(txn_cf->Put(handles_[i % 2], "key" + std::to_string(i),
+                            "value" + std::to_string(i)));
+    }
+    ASSERT_OK(txn_cf->Prepare());
+    ASSERT_OK(txn_cf->Commit());
+    ASSERT_EQ(commit_bypass_memtable, num_ops > threshold);
+    delete txn_cf;
+  }
+}
+
+TEST_P(CommitBypassMemtableTest, AtomicFlushTest) {
+  const uint32_t threshold = 10;
+  SetUpTransactionDB(/*threshold=*/threshold, /*atomic_flush=*/true);
+  SyncPoint::GetInstance()->EnableProcessing();
+
+  std::vector<std::string> cfs = {"cf0", "cf1", "cf2"};
+  CreateColumnFamilies(cfs, options);
+
+  // Seed data in CF1 and 2 as atomic flush picks CFs with non-empty memtable
+  ASSERT_OK(db_->Put({}, handles_[1], "key1", "val1"));
+  ASSERT_OK(db_->Put({}, handles_[2], "key2", "val2"));
+
+  // Write to cf 0, should see cf1 and cf2 flushed too
+  auto txn = txn_db->BeginTransaction({}, {}, nullptr);
+  for (uint32_t i = 0; i <= threshold; ++i) {
+    ASSERT_OK(txn->Put(handles_[0], "key" + std::to_string(i),
+                       "cf0" + std::to_string(i)));
+  }
+  ASSERT_OK(txn->SetName("cf0"));
+  ASSERT_OK(txn->Prepare());
+  ASSERT_OK(txn->Commit());
+  delete txn;
+
+  ASSERT_OK(db_->WaitForCompact({}));
+  for (size_t i = 0; i < 3; ++i) {
+    auto cfh = static_cast<ColumnFamilyHandleImpl*>(handles_[i]);
+    ASSERT_EQ(0, cfh->cfd()->imm()->NumNotFlushed());
+    ASSERT_TRUE(cfh->cfd()->mem()->IsEmpty());
+  }
+}
+
+TEST_P(CommitBypassMemtableTest, MergeAndMultiCF) {
+  // disable_flush allows testing Get path with memtables.
+  for (bool disable_flush : {false, true}) {
+    SCOPED_TRACE("disable_flush: " + std::to_string(disable_flush));
+    SetUpTransactionDB();
+    if (disable_flush) {
+      ASSERT_OK(txn_db->PauseBackgroundWork());
+    }
+
+    std::vector<std::string> cfs = {"appendmerge"};
+    Options opts;
+    opts.max_write_buffer_number = 8;
+    opts.merge_operator = MergeOperators::CreateFromStringId("stringappend");
+    CreateColumnFamilies(cfs, opts);
+
+    cfs = {"uint64addmerge"};
+    opts.merge_operator = MergeOperators::CreateFromStringId("uint64add");
+    CreateColumnFamilies(cfs, opts);
+
+    cfs = {"data"};
+    opts.merge_operator = nullptr;
+    CreateColumnFamilies(cfs, opts);
+    ASSERT_TRUE(handles_.size() == 3);
+
+    std::string buf_count;
+    PutFixed64(&buf_count, 1);
+    // Some base data in SST or memtable
+    ASSERT_OK(db_->Merge({}, handles_[1], "count", buf_count));
+    ASSERT_OK(db_->Put({}, handles_[0], "k5", "5v1"));
+    ASSERT_OK(db_->Merge({}, handles_[0], "k7", "7v1"));
+    if (!disable_flush) {
+      ASSERT_OK(db_->Flush({}, handles_[1]));
+    }
+
+    WriteOptions wopts;
+    TransactionOptions txn_opts;
+    txn_opts.commit_bypass_memtable = true;
+    Transaction* txn = txn_db->BeginTransaction(wopts, txn_opts);
+    ASSERT_OK(txn->SetName("xid1"));
+    ASSERT_OK(txn->Put(handles_[0], "k1", "v1"));
+    ASSERT_OK(txn->Merge(handles_[0], "k1", "v2"));
+
+    ASSERT_OK(txn->Delete(handles_[0], "k2"));
+    ASSERT_OK(txn->Merge(handles_[0], "k2", "v1"));
+
+    ASSERT_OK(txn->Merge(handles_[0], "k3", "v1"));
+    ASSERT_OK(txn->Delete(handles_[0], "k3"));
+
+    ASSERT_OK(txn->Merge(handles_[0], "k4", "v1"));
+    ASSERT_OK(txn->Put(handles_[0], "k4", "v4"));
+
+    ASSERT_OK(txn->Merge(handles_[0], "k5", "5v2"));
+
+    ASSERT_OK(txn->Merge(handles_[0], "k6", "6v1"));
+    ASSERT_OK(txn->Merge(handles_[0], "k6", "6v2"));
+
+    ASSERT_OK(txn->Merge(handles_[0], "k7", "7v2"));
+    ASSERT_OK(txn->Merge(handles_[0], "k7", "7v3"));
+
+    ASSERT_OK(txn->Merge(handles_[1], "count", buf_count));
+    ASSERT_OK(txn->Merge(handles_[1], "count", buf_count));
+
+    ASSERT_OK(txn->Put(handles_[2], "a", "a1"));
+    ASSERT_OK(txn->Put(handles_[2], "c", "c1"));
+
+    ASSERT_OK(txn->Prepare());
+    ASSERT_OK(txn->Commit());
+
+    // Data in mutable memtable
+    txn_opts.commit_bypass_memtable = false;
+    txn = txn_db->BeginTransaction(wopts, txn_opts, txn);
+    ASSERT_OK(txn->SetName("xid2"));
+    ASSERT_OK(txn->Merge(handles_[0], "k1", "v3"));
+    ASSERT_OK(txn->Merge(handles_[1], "count", buf_count));
+    ASSERT_OK(txn->Prepare());
+    ASSERT_OK(txn->Commit());
+    delete txn;
+
+    std::map<std::string, std::string> expected_cf0 = {
+        {"k1", "v1,v2,v3"}, {"k2", "v1"},      {"k4", "v4"},
+        {"k5", "5v1,5v2"},  {"k6", "6v1,6v2"}, {"k7", "7v1,7v2,7v3"},
+    };
+    std::unordered_set<std::string> not_found_cf0 = {"k3"};
+    VerifyDBFromMap(expected_cf0, nullptr, false, nullptr, handles_[0],
+                    &not_found_cf0);
+
+    std::string count;
+    PutFixed64(&count, 4);
+    std::map<std::string, std::string> expected_cf1 = {
+        {"count", count},
+    };
+    VerifyDBFromMap(expected_cf1, nullptr, false, nullptr, handles_[1]);
+
+    std::map<std::string, std::string> expected_cf2 = {
+        {"a", "a1"},
+        {"c", "c1"},
+    };
+    VerifyDBFromMap(expected_cf2, nullptr, false, nullptr, handles_[2]);
+
+    // Verify all data is flushed
+    if (disable_flush) {
+      uint64_t num_imm_mems = 0;
+      ASSERT_TRUE(txn_db->GetIntProperty(
+          handles_[0], DB::Properties::kNumImmutableMemTable, &num_imm_mems));
+      ASSERT_EQ(2,
+                num_imm_mems);  // 1 imm mem before WBWI, 1 imm is WBWI itself
+
+      // Test GetMergeOperands() for CF0
+      std::vector<PinnableSlice> merge_operands(4);
+      GetMergeOperandsOptions merge_operand_opts;
+      merge_operand_opts.expected_max_number_of_operands = 4;
+      int num_operands = 0;
+      ASSERT_OK(db_->GetMergeOperands({}, handles_[0], "k1",
+                                      merge_operands.data(),
+                                      &merge_operand_opts, &num_operands));
+      ASSERT_EQ(num_operands, 3);
+      ASSERT_EQ(merge_operands[0], "v1");
+      ASSERT_EQ(merge_operands[1], "v2");
+      ASSERT_EQ(merge_operands[2], "v3");
+
+      ASSERT_OK(db_->ContinueBackgroundWork());
+      ASSERT_OK(db_->Flush({}, {handles_[0], handles_[1], handles_[2]}));
+    } else {
+      ASSERT_OK(db_->WaitForCompact({}));
+    }
+
+    VerifyDBFromMap(expected_cf0, nullptr, false, nullptr, handles_[0],
+                    &not_found_cf0);
+    VerifyDBFromMap(expected_cf1, nullptr, false, nullptr, handles_[1]);
+    VerifyDBFromMap(expected_cf2, nullptr, false, nullptr, handles_[2]);
+  }
+}
+
+TEST_P(CommitBypassMemtableTest, MergeMiniStress) {
+  // To test the merge path with various LSM shapes
+  std::string key_prefix = "key";
+  std::string value_prefix = "val";
+  Random* rnd = Random::GetTLSInstance();
+  const int kBatchSize = 50;
+  for (int num_memtable_to_merge : {1, 4}) {
+    SetUpTransactionDB();
+    std::vector<std::string> cfs = {"appendmerge"};
+    Options opts;
+    opts.max_write_buffer_number = 10;
+    // Exercise read path of memtables.
+    opts.min_write_buffer_number_to_merge = num_memtable_to_merge;
+    opts.merge_operator = MergeOperators::CreateFromStringId("stringappend");
+    CreateColumnFamilies(cfs, opts);
+    ASSERT_TRUE(handles_.size() == 1);
+
+    std::map<std::string, std::string> expected_cf;
+    std::unordered_set<std::string> not_found_cf;
+    for (int i = 0; i < 10000; i += kBatchSize) {
+      WriteOptions wopts;
+      TransactionOptions txn_opts;
+      txn_opts.commit_bypass_memtable = rnd->OneIn(2);
+      std::unique_ptr<Transaction> txn{
+          txn_db->BeginTransaction(wopts, txn_opts)};
+      const int txn_count = i / kBatchSize;
+      ASSERT_OK(txn->SetName("xid" + std::to_string(txn_count)));
+
+      const Snapshot* snapshot = txn_db->GetSnapshot();
+      // Remember the state for the snapshot
+      auto expected_cf_snapshot = expected_cf;
+      auto not_found_cf_snapshot = not_found_cf;
+
+      for (int j = 0; j < kBatchSize; ++j) {
+        std::string key = key_prefix + std::to_string(rnd->Uniform(1000));
+        std::string value = value_prefix + std::to_string(i + j);
+        int operation = rnd->Uniform(10);
+        if (operation < 8) {  // 80% probability for Merge
+          ASSERT_OK(txn->Merge(handles_[0], key, value));
+          if (expected_cf.find(key) != expected_cf.end()) {
+            expected_cf[key] += "," + value;
+          } else {
+            expected_cf[key] = value;
+          }
+          not_found_cf.erase(key);
+        } else if (operation == 8) {  // 10% probability for PUT
+          ASSERT_OK(txn->Put(handles_[0], key, value));
+          expected_cf[key] = value;
+          not_found_cf.erase(key);
+        } else {  // 10% probability for DEL
+          ASSERT_OK(txn->Delete(handles_[0], key));
+          expected_cf.erase(key);
+          not_found_cf.insert(key);
+        }
+      }
+      ASSERT_OK(txn->Prepare());
+      ASSERT_OK(txn->Commit());
+
+      if (txn_count % 10 == 0) {
+        VerifyDBFromMap(expected_cf, nullptr, false, nullptr, handles_[0],
+                        &not_found_cf);
+        // Verify read at snapshot
+        ReadOptions ro;
+        ro.snapshot = snapshot;
+        VerifyDBFromMap(expected_cf_snapshot, nullptr, false, &ro, handles_[0],
+                        &not_found_cf_snapshot);
+      }
+      txn_db->ReleaseSnapshot(snapshot);
+    }
+
+    VerifyDBFromMap(expected_cf, nullptr, false, nullptr, handles_[0]);
+  }
+}
 }  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {

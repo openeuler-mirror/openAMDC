@@ -3,7 +3,6 @@
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
 
-
 #include <algorithm>
 #include <atomic>
 #include <cinttypes>
@@ -792,7 +791,8 @@ TEST_P(WritePreparedTransactionTest, CheckKeySkipOldMemtable) {
   const int kAttemptImmMemTable = 1;
   for (int attempt = kAttemptHistoryMemtable; attempt <= kAttemptImmMemTable;
        attempt++) {
-    options.max_write_buffer_number_to_maintain = 3;
+    options.max_write_buffer_size_to_maintain =
+        3 * static_cast<int>(options.write_buffer_size);
     ASSERT_OK(ReOpen());
 
     WriteOptions write_options;
@@ -3596,7 +3596,7 @@ TEST_P(WritePreparedTransactionTest, NonAtomicCommitOfDelayedPrepared) {
       ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->DisableProcessing();
       ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->ClearAllCallBacks();
     }  // for split_before_mutex
-  }    // for split_read
+  }  // for split_read
 }
 
 // When max evicted seq advances a prepared seq, it involves two updates: i)

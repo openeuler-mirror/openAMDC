@@ -33,8 +33,16 @@ struct CompactionJobStats {
   uint64_t num_blobs_read = 0;
   // the number of compaction input files (table files)
   size_t num_input_files = 0;
+  // The number of input files that get trivially moved.
+  size_t num_input_files_trivially_moved = 0;
   // the number of compaction input files at the output level (table files)
   size_t num_input_files_at_output_level = 0;
+  // the number of compaction input files that are filtered out by compaction
+  // optimizations
+  size_t num_filtered_input_files = 0;
+  // the number of compaction input files at the output level that are filtered
+  // out by compaction optimizations
+  size_t num_filtered_input_files_at_output_level = 0;
 
   // the number of compaction output records.
   uint64_t num_output_records = 0;
@@ -58,6 +66,9 @@ struct CompactionJobStats {
   uint64_t total_output_bytes = 0;
   // the total size of blob files in the compaction output
   uint64_t total_output_bytes_blob = 0;
+  // the total size of table files for compaction input files that are skipped
+  // because input files are filtered out by compaction optimizations.
+  uint64_t total_skipped_input_bytes = 0;
 
   // number of records being replaced by newer record associated with same key.
   // this could be a new value or a deletion entry for that key so this field
@@ -109,6 +120,6 @@ struct CompactionJobStats {
   // number of single-deletes which meet something other than a put
   uint64_t num_single_del_mismatch = 0;
 
-  // TODO: Add output_to_penultimate_level output information
+  // TODO: Add output_to_proximal_level output information
 };
 }  // namespace ROCKSDB_NAMESPACE

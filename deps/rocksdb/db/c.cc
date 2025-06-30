@@ -231,7 +231,7 @@ struct rocksdb_livefiles_t {
 };
 struct rocksdb_column_family_handle_t {
   ColumnFamilyHandle* rep;
-  bool immortal;  /* only true for default cf */
+  bool immortal; /* only true for default cf */
 };
 struct rocksdb_column_family_metadata_t {
   ColumnFamilyMetaData rep;
@@ -1858,10 +1858,6 @@ extern ROCKSDB_LIBRARY_API void rocksdb_approximate_sizes_cf_with_flags(
   delete[] ranges;
 }
 
-void rocksdb_delete_file(rocksdb_t* db, const char* name) {
-  db->rep->DeleteFile(name);
-}
-
 const rocksdb_livefiles_t* rocksdb_livefiles(rocksdb_t* db) {
   rocksdb_livefiles_t* result = new rocksdb_livefiles_t;
   db->rep->GetLiveFilesMetaData(&result->rep);
@@ -3299,6 +3295,16 @@ uint64_t rocksdb_options_get_periodic_compaction_seconds(
   return opt->rep.periodic_compaction_seconds;
 }
 
+void rocksdb_options_set_memtable_op_scan_flush_trigger(rocksdb_options_t* opt,
+                                                        uint32_t n) {
+  opt->rep.memtable_op_scan_flush_trigger = n;
+}
+
+uint32_t rocksdb_options_get_memtable_op_scan_flush_trigger(
+    rocksdb_options_t* opt) {
+  return opt->rep.memtable_op_scan_flush_trigger;
+}
+
 void rocksdb_options_enable_statistics(rocksdb_options_t* opt) {
   opt->rep.statistics = ROCKSDB_NAMESPACE::CreateDBStatistics();
 }
@@ -3806,16 +3812,6 @@ void rocksdb_options_set_min_write_buffer_number_to_merge(
 int rocksdb_options_get_min_write_buffer_number_to_merge(
     rocksdb_options_t* opt) {
   return opt->rep.min_write_buffer_number_to_merge;
-}
-
-void rocksdb_options_set_max_write_buffer_number_to_maintain(
-    rocksdb_options_t* opt, int n) {
-  opt->rep.max_write_buffer_number_to_maintain = n;
-}
-
-int rocksdb_options_get_max_write_buffer_number_to_maintain(
-    rocksdb_options_t* opt) {
-  return opt->rep.max_write_buffer_number_to_maintain;
 }
 
 void rocksdb_options_set_max_write_buffer_size_to_maintain(
@@ -4998,6 +4994,35 @@ void rocksdb_compactoptions_set_target_level(rocksdb_compactoptions_t* opt,
 
 int rocksdb_compactoptions_get_target_level(rocksdb_compactoptions_t* opt) {
   return opt->rep.target_level;
+}
+
+void rocksdb_compactoptions_set_target_path_id(rocksdb_compactoptions_t* opt,
+                                               int n) {
+  opt->rep.target_path_id = n;
+}
+
+int rocksdb_compactoptions_get_target_path_id(rocksdb_compactoptions_t* opt) {
+  return opt->rep.target_path_id;
+}
+
+void rocksdb_compactoptions_set_allow_write_stall(rocksdb_compactoptions_t* opt,
+                                                  unsigned char v) {
+  opt->rep.allow_write_stall = v;
+}
+
+unsigned char rocksdb_compactoptions_get_allow_write_stall(
+    rocksdb_compactoptions_t* opt) {
+  return opt->rep.allow_write_stall;
+}
+
+void rocksdb_compactoptions_set_max_subcompactions(
+    rocksdb_compactoptions_t* opt, int n) {
+  opt->rep.max_subcompactions = n;
+}
+
+int rocksdb_compactoptions_get_max_subcompactions(
+    rocksdb_compactoptions_t* opt) {
+  return opt->rep.max_subcompactions;
 }
 
 void rocksdb_compactoptions_set_full_history_ts_low(

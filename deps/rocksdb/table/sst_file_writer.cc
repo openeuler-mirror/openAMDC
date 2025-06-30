@@ -25,7 +25,6 @@ const std::string ExternalSstFilePropertyNames::kVersion =
 const std::string ExternalSstFilePropertyNames::kGlobalSeqno =
     "rocksdb.external_sst_file.global_seqno";
 
-
 const size_t kFadviseTrigger = 1024 * 1024;  // 1MB
 
 struct SstFileWriter::Rep {
@@ -395,10 +394,10 @@ Status SstFileWriter::Open(const std::string& file_path, Temperature temp) {
       r->ioptions, r->mutable_cf_options, ReadOptions(), r->write_options,
       r->internal_comparator, &internal_tbl_prop_coll_factories,
       compression_type, compression_opts, cf_id, r->column_family_name,
-      unknown_level, false /* is_bottommost */, TableFileCreationReason::kMisc,
-      0 /* oldest_key_time */, 0 /* file_creation_time */,
-      "SST Writer" /* db_id */, r->db_session_id, 0 /* target_file_size */,
-      r->next_file_number);
+      unknown_level, kUnknownNewestKeyTime, false /* is_bottommost */,
+      TableFileCreationReason::kMisc, 0 /* oldest_key_time */,
+      0 /* file_creation_time */, "SST Writer" /* db_id */, r->db_session_id,
+      0 /* target_file_size */, r->next_file_number);
   // External SST files used to each get a unique session id. Now for
   // slightly better uniqueness probability in constructing cache keys, we
   // assign fake file numbers to each file (into table properties) and keep

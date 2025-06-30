@@ -3,7 +3,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-
 #include <map>
 #include <memory>
 
@@ -618,7 +617,6 @@ TEST_F(TtlTest, UnregisteredMergeOperator) {
    public:
     const char* Name() const override { return "UnregisteredMergeOperator"; }
   };
-  options_.fail_if_options_file_error = true;
   options_.merge_operator = std::make_shared<UnregisteredMergeOperator>();
   OpenTtl();
   CloseTtl();
@@ -931,4 +929,3 @@ int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
-

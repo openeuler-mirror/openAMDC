@@ -142,7 +142,7 @@ class UniversalCompactionBuilder {
 
   bool ShouldSkipLastSortedRunForSizeAmpCompaction() const {
     assert(!sorted_runs_.empty());
-    return ioptions_.preclude_last_level_data_seconds > 0 &&
+    return mutable_cf_options_.preclude_last_level_data_seconds > 0 &&
            ioptions_.num_levels > 2 &&
            sorted_runs_.back().level == ioptions_.num_levels - 1 &&
            sorted_runs_.size() > 1;
@@ -288,7 +288,9 @@ class UniversalCompactionBuilder {
 // and the index of the file in that level
 
 struct InputFileInfo {
-  InputFileInfo() : f(nullptr), level(0), index(0) {}
+  InputFileInfo() : InputFileInfo(nullptr, 0, 0) {}
+  InputFileInfo(FileMetaData* file_meta, size_t l, size_t i)
+      : f(file_meta), level(l), index(i) {}
 
   FileMetaData* f;
   size_t level;
@@ -321,22 +323,14 @@ SmallestKeyHeap create_level_heap(Compaction* c, const Comparator* ucmp) {
   SmallestKeyHeap smallest_key_priority_q =
       SmallestKeyHeap(SmallestKeyHeapComparator(ucmp));
 
-  InputFileInfo input_file;
-
   for (size_t l = 0; l < c->num_input_levels(); l++) {
     if (c->num_input_files(l) != 0) {
       if (l == 0 && c->start_level() == 0) {
         for (size_t i = 0; i < c->num_input_files(0); i++) {
-          input_file.f = c->input(0, i);
-          input_file.level = 0;
-          input_file.index = i;
-          smallest_key_priority_q.push(std::move(input_file));
+          smallest_key_priority_q.emplace(c->input(0, i), 0, i);
         }
       } else {
-        input_file.f = c->input(l, 0);
-        input_file.level = l;
-        input_file.index = 0;
-        smallest_key_priority_q.push(std::move(input_file));
+        smallest_key_priority_q.emplace(c->input(l, 0), l, 0);
       }
     }
   }
@@ -374,7 +368,7 @@ bool UniversalCompactionBuilder::IsInputFilesNonOverlapping(Compaction* c) {
   auto comparator = icmp_->user_comparator();
   int first_iter = 1;
 
-  InputFileInfo prev, curr, next;
+  InputFileInfo prev, curr;
 
   SmallestKeyHeap smallest_key_priority_q =
       create_level_heap(c, icmp_->user_comparator());
@@ -397,17 +391,10 @@ bool UniversalCompactionBuilder::IsInputFilesNonOverlapping(Compaction* c) {
       prev = curr;
     }
 
-    next.f = nullptr;
-
     if (c->level(curr.level) != 0 &&
         curr.index < c->num_input_files(curr.level) - 1) {
-      next.f = c->input(curr.level, curr.index + 1);
-      next.level = curr.level;
-      next.index = curr.index + 1;
-    }
-
-    if (next.f) {
-      smallest_key_priority_q.push(std::move(next));
+      smallest_key_priority_q.emplace(c->input(curr.level, curr.index + 1),
+                                      curr.level, curr.index + 1);
     }
   }
   return true;
@@ -994,11 +981,11 @@ Compaction* UniversalCompactionBuilder::PickCompactionToReduceSortedRuns(
     grandparents = vstorage_->LevelFiles(sorted_runs_[first_index_after].level);
   }
 
-  if (output_level != 0 &&
-      picker_->FilesRangeOverlapWithCompaction(
-          inputs, output_level,
-          Compaction::EvaluatePenultimateLevel(vstorage_, ioptions_,
-                                               start_level, output_level))) {
+  if (output_level != 0 && picker_->FilesRangeOverlapWithCompaction(
+                               inputs, output_level,
+                               Compaction::EvaluateProximalLevel(
+                                   vstorage_, mutable_cf_options_, ioptions_,
+                                   start_level, output_level))) {
     return nullptr;
   }
   CompactionReason compaction_reason;
@@ -1343,11 +1330,11 @@ Compaction* UniversalCompactionBuilder::PickIncrementalForReduceSizeAmp(
   }
 
   // intra L0 compactions outputs could have overlap
-  if (output_level != 0 &&
-      picker_->FilesRangeOverlapWithCompaction(
-          inputs, output_level,
-          Compaction::EvaluatePenultimateLevel(vstorage_, ioptions_,
-                                               start_level, output_level))) {
+  if (output_level != 0 && picker_->FilesRangeOverlapWithCompaction(
+                               inputs, output_level,
+                               Compaction::EvaluateProximalLevel(
+                                   vstorage_, mutable_cf_options_, ioptions_,
+                                   start_level, output_level))) {
     return nullptr;
   }
 
@@ -1486,8 +1473,9 @@ Compaction* UniversalCompactionBuilder::PickDeleteTriggeredCompaction() {
       }
       if (picker_->FilesRangeOverlapWithCompaction(
               inputs, output_level,
-              Compaction::EvaluatePenultimateLevel(
-                  vstorage_, ioptions_, start_level, output_level))) {
+              Compaction::EvaluateProximalLevel(vstorage_, mutable_cf_options_,
+                                                ioptions_, start_level,
+                                                output_level))) {
         return nullptr;
       }
 
@@ -1587,11 +1575,11 @@ Compaction* UniversalCompactionBuilder::PickCompactionWithSortedRunRange(
   }
 
   // intra L0 compactions outputs could have overlap
-  if (output_level != 0 &&
-      picker_->FilesRangeOverlapWithCompaction(
-          inputs, output_level,
-          Compaction::EvaluatePenultimateLevel(vstorage_, ioptions_,
-                                               start_level, output_level))) {
+  if (output_level != 0 && picker_->FilesRangeOverlapWithCompaction(
+                               inputs, output_level,
+                               Compaction::EvaluateProximalLevel(
+                                   vstorage_, mutable_cf_options_, ioptions_,
+                                   start_level, output_level))) {
     return nullptr;
   }
 

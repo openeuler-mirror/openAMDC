@@ -348,7 +348,14 @@ void MultiOpsTxnsStressTest::ReopenAndPreloadDbIfNeeded(SharedState* shared) {
   (void)shared;
   bool db_empty = false;
   {
-    std::unique_ptr<Iterator> iter(db_->NewIterator(ReadOptions()));
+    ReadOptions ropt;
+    std::unique_ptr<ManagedSnapshot> snapshot = nullptr;
+    if (FLAGS_auto_refresh_iterator_with_snapshot) {
+      snapshot = std::make_unique<ManagedSnapshot>(db_);
+      ropt.snapshot = snapshot->snapshot();
+      ropt.auto_refresh_iterator_with_snapshot = true;
+    }
+    std::unique_ptr<Iterator> iter(db_->NewIterator(ropt));
     iter->SeekToFirst();
     if (!iter->Valid()) {
       db_empty = true;
@@ -544,6 +551,11 @@ Status MultiOpsTxnsStressTest::TestCustomOperations(
     // Should never reach here.
     assert(false);
   }
+  if (!s.ok()) {
+    fprintf(stderr, "Transaction failed %s\n", s.ToString().c_str());
+    fflush(stderr);
+    thread->shared->SafeTerminate();
+  }
 
   return s;
 }
@@ -579,7 +591,7 @@ Status MultiOpsTxnsStressTest::PrimaryKeyUpdateTxn(ThreadState* thread,
   std::string new_pk = Record::EncodePrimaryKey(new_a);
   std::unique_ptr<Transaction> txn;
   WriteOptions wopts;
-  Status s = NewTxn(wopts, &txn);
+  Status s = NewTxn(wopts, thread, &txn);
   if (!s.ok()) {
     assert(!txn);
     thread->stats.AddErrors(1);
@@ -611,7 +623,12 @@ Status MultiOpsTxnsStressTest::PrimaryKeyUpdateTxn(ThreadState* thread,
     }
     auto& key_gen = key_gen_for_a_[thread->tid];
     key_gen->UndoAllocation(new_a);
-    txn->Rollback().PermitUncheckedError();
+    s = txn->Rollback();
+    if (!s.ok()) {
+      fprintf(stderr, "Transaction rollback failed %s\n", s.ToString().c_str());
+      fflush(stderr);
+      assert(false);
+    }
   });
 
   ReadOptions ropts;
@@ -699,7 +716,7 @@ Status MultiOpsTxnsStressTest::SecondaryKeyUpdateTxn(ThreadState* thread,
                                                      uint32_t new_c) {
   std::unique_ptr<Transaction> txn;
   WriteOptions wopts;
-  Status s = NewTxn(wopts, &txn);
+  Status s = NewTxn(wopts, thread, &txn);
   if (!s.ok()) {
     assert(!txn);
     thread->stats.AddErrors(1);
@@ -735,7 +752,12 @@ Status MultiOpsTxnsStressTest::SecondaryKeyUpdateTxn(ThreadState* thread,
     }
     auto& key_gen = key_gen_for_c_[thread->tid];
     key_gen->UndoAllocation(new_c);
-    txn->Rollback().PermitUncheckedError();
+    s = txn->Rollback();
+    if (!s.ok()) {
+      fprintf(stderr, "Transaction rollback failed %s\n", s.ToString().c_str());
+      fflush(stderr);
+      assert(false);
+    }
   });
 
   // TODO (yanqin) try SetSnapshotOnNextOperation(). We currently need to take
@@ -752,6 +774,8 @@ Status MultiOpsTxnsStressTest::SecondaryKeyUpdateTxn(ThreadState* thread,
   Slice iter_ub = iter_ub_str;
   ReadOptions ropts;
   ropts.snapshot = txn->GetSnapshot();
+  ropts.auto_refresh_iterator_with_snapshot =
+      FLAGS_auto_refresh_iterator_with_snapshot;
   ropts.total_order_seek = true;
   ropts.iterate_upper_bound = &iter_ub;
   ropts.rate_limiter_priority =
@@ -901,7 +925,7 @@ Status MultiOpsTxnsStressTest::UpdatePrimaryIndexValueTxn(ThreadState* thread,
   std::string pk_str = Record::EncodePrimaryKey(a);
   std::unique_ptr<Transaction> txn;
   WriteOptions wopts;
-  Status s = NewTxn(wopts, &txn);
+  Status s = NewTxn(wopts, thread, &txn);
   if (!s.ok()) {
     assert(!txn);
     thread->stats.AddErrors(1);
@@ -927,7 +951,12 @@ Status MultiOpsTxnsStressTest::UpdatePrimaryIndexValueTxn(ThreadState* thread,
     } else {
       thread->stats.AddErrors(1);
     }
-    txn->Rollback().PermitUncheckedError();
+    s = txn->Rollback();
+    if (!s.ok()) {
+      fprintf(stderr, "Transaction rollback failed %s\n", s.ToString().c_str());
+      fflush(stderr);
+      assert(false);
+    }
   });
   ReadOptions ropts;
   ropts.rate_limiter_priority =
@@ -982,7 +1011,7 @@ Status MultiOpsTxnsStressTest::PointLookupTxn(ThreadState* thread,
 
   std::unique_ptr<Transaction> txn;
   WriteOptions wopts;
-  Status s = NewTxn(wopts, &txn);
+  Status s = NewTxn(wopts, thread, &txn);
   if (!s.ok()) {
     assert(!txn);
     thread->stats.AddErrors(1);
@@ -1026,7 +1055,7 @@ Status MultiOpsTxnsStressTest::RangeScanTxn(ThreadState* thread,
 
   std::unique_ptr<Transaction> txn;
   WriteOptions wopts;
-  Status s = NewTxn(wopts, &txn);
+  Status s = NewTxn(wopts, thread, &txn);
   if (!s.ok()) {
     assert(!txn);
     thread->stats.AddErrors(1);
@@ -1116,6 +1145,8 @@ void MultiOpsTxnsStressTest::VerifyDb(ThreadState* thread) const {
     // `FLAGS_rate_limit_user_ops` to avoid slowing any validation.
     ReadOptions ropts;
     ropts.snapshot = snapshot;
+    ropts.auto_refresh_iterator_with_snapshot =
+        FLAGS_auto_refresh_iterator_with_snapshot;
     ropts.total_order_seek = true;
     ropts.iterate_upper_bound = &iter_ub;
     if (FLAGS_use_sqfc_for_range_queries) {
@@ -1171,6 +1202,8 @@ void MultiOpsTxnsStressTest::VerifyDb(ThreadState* thread) const {
     // `FLAGS_rate_limit_user_ops` to avoid slowing any validation.
     ReadOptions ropts;
     ropts.snapshot = snapshot;
+    ropts.auto_refresh_iterator_with_snapshot =
+        FLAGS_auto_refresh_iterator_with_snapshot;
     ropts.total_order_seek = true;
 
     std::unique_ptr<Iterator> it(db_->NewIterator(ropts));
@@ -1269,6 +1302,8 @@ void MultiOpsTxnsStressTest::VerifyPkSkFast(const ReadOptions& read_options,
   // `FLAGS_rate_limit_user_ops` to avoid slowing any validation.
   ReadOptions ropts;
   ropts.snapshot = snapshot;
+  ropts.auto_refresh_iterator_with_snapshot =
+      FLAGS_auto_refresh_iterator_with_snapshot;
   ropts.total_order_seek = true;
   ropts.io_activity = read_options.io_activity;
 
@@ -1384,6 +1419,12 @@ Status MultiOpsTxnsStressTest::CommitAndCreateTimestampedSnapshotIfNeeded(
   } else {
     s = txn.Commit();
   }
+  if (!s.ok()) {
+    fprintf(stderr, "Txn %s commit failed with %s\n", txn.GetName().c_str(),
+            s.ToString().c_str());
+    fflush(stderr);
+  }
+
   assert(txn_db_);
   if (FLAGS_create_timestamped_snapshot_one_in > 0 &&
       thread->rand.OneInOpt(50000)) {
@@ -1617,6 +1658,13 @@ void MultiOpsTxnsStressTest::ScanExistingDb(SharedState* shared, int threads) {
 
   assert(db_);
   ReadOptions ropts;
+  std::unique_ptr<ManagedSnapshot> snapshot = nullptr;
+  if (FLAGS_auto_refresh_iterator_with_snapshot) {
+    snapshot = std::make_unique<ManagedSnapshot>(db_);
+    ropts.snapshot = snapshot->snapshot();
+    ropts.auto_refresh_iterator_with_snapshot = true;
+  }
+
   std::vector<KeySet> existing_a_uniqs(threads);
   std::vector<KeySet> non_existing_a_uniqs(threads);
   std::vector<KeySet> existing_c_uniqs(threads);

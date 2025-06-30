@@ -3,7 +3,6 @@
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
 
-
 #include "utilities/transactions/lock/point/point_lock_manager.h"
 
 #include <algorithm>
@@ -319,6 +318,9 @@ Status PointLockManager::AcquireWithTimeout(
       } else {
         uint64_t now = env->NowMicros();
         if (static_cast<uint64_t>(cv_end_time) > now) {
+          // This may be invoked multiple times since we divide
+          // the time into smaller intervals.
+          (void)ROCKSDB_THREAD_YIELD_CHECK_ABORT();
           result = stripe->stripe_cv->WaitFor(stripe->stripe_mutex,
                                               cv_end_time - now);
         }

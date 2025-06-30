@@ -7,6 +7,7 @@
 
 #include <cassert>
 #include <cinttypes>
+#include <iostream>
 #include <limits>
 #include <string>
 
@@ -551,6 +552,14 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct MutableCFOptions, periodic_compaction_seconds),
           OptionType::kUInt64T, OptionVerificationType::kNormal,
           OptionTypeFlags::kMutable}},
+        {"preclude_last_level_data_seconds",
+         {offsetof(struct MutableCFOptions, preclude_last_level_data_seconds),
+          OptionType::kUInt64T, OptionVerificationType::kNormal,
+          OptionTypeFlags::kMutable}},
+        {"preserve_internal_time_seconds",
+         {offsetof(struct MutableCFOptions, preserve_internal_time_seconds),
+          OptionType::kUInt64T, OptionVerificationType::kNormal,
+          OptionTypeFlags::kMutable}},
         {"bottommost_temperature",
          {0, OptionType::kTemperature, OptionVerificationType::kDeprecated,
           OptionTypeFlags::kMutable}},
@@ -685,7 +694,10 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct MutableCFOptions, memtable_max_range_deletions),
           OptionType::kUInt32T, OptionVerificationType::kNormal,
           OptionTypeFlags::kMutable}},
-
+        {"memtable_op_scan_flush_trigger",
+         {offsetof(struct MutableCFOptions, memtable_op_scan_flush_trigger),
+          OptionType::kUInt32T, OptionVerificationType::kNormal,
+          OptionTypeFlags::kMutable}},
 };
 
 static std::unordered_map<std::string, OptionTypeInfo>
@@ -727,26 +739,20 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct ImmutableCFOptions, force_consistency_checks),
           OptionType::kBoolean, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
+        {"disallow_memtable_writes",
+         {offsetof(struct ImmutableCFOptions, disallow_memtable_writes),
+          OptionType::kBoolean, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
         {"default_temperature",
          {offsetof(struct ImmutableCFOptions, default_temperature),
           OptionType::kTemperature, OptionVerificationType::kNormal,
           OptionTypeFlags::kCompareNever}},
-        {"preclude_last_level_data_seconds",
-         {offsetof(struct ImmutableCFOptions, preclude_last_level_data_seconds),
-          OptionType::kUInt64T, OptionVerificationType::kNormal,
-          OptionTypeFlags::kNone}},
-        {"preserve_internal_time_seconds",
-         {offsetof(struct ImmutableCFOptions, preserve_internal_time_seconds),
-          OptionType::kUInt64T, OptionVerificationType::kNormal,
-          OptionTypeFlags::kNone}},
         // Need to keep this around to be able to read old OPTIONS files.
         {"max_mem_compaction_level",
          {0, OptionType::kInt, OptionVerificationType::kDeprecated,
           OptionTypeFlags::kNone}},
         {"max_write_buffer_number_to_maintain",
-         {offsetof(struct ImmutableCFOptions,
-                   max_write_buffer_number_to_maintain),
-          OptionType::kInt, OptionVerificationType::kNormal,
+         {0, OptionType::kInt, OptionVerificationType::kDeprecated,
           OptionTypeFlags::kNone, nullptr}},
         {"max_write_buffer_size_to_maintain",
          {offsetof(struct ImmutableCFOptions,
@@ -982,8 +988,6 @@ ImmutableCFOptions::ImmutableCFOptions(const ColumnFamilyOptions& cf_options)
       compaction_filter_factory(cf_options.compaction_filter_factory),
       min_write_buffer_number_to_merge(
           cf_options.min_write_buffer_number_to_merge),
-      max_write_buffer_number_to_maintain(
-          cf_options.max_write_buffer_number_to_maintain),
       max_write_buffer_size_to_maintain(
           cf_options.max_write_buffer_size_to_maintain),
       inplace_update_support(cf_options.inplace_update_support),
@@ -997,10 +1001,8 @@ ImmutableCFOptions::ImmutableCFOptions(const ColumnFamilyOptions& cf_options)
       num_levels(cf_options.num_levels),
       optimize_filters_for_hits(cf_options.optimize_filters_for_hits),
       force_consistency_checks(cf_options.force_consistency_checks),
+      disallow_memtable_writes(cf_options.disallow_memtable_writes),
       default_temperature(cf_options.default_temperature),
-      preclude_last_level_data_seconds(
-          cf_options.preclude_last_level_data_seconds),
-      preserve_internal_time_seconds(cf_options.preserve_internal_time_seconds),
       memtable_insert_with_hint_prefix_extractor(
           cf_options.memtable_insert_with_hint_prefix_extractor),
       cf_paths(cf_options.cf_paths),
@@ -1045,9 +1047,9 @@ uint64_t MultiplyCheckOverflow(uint64_t op1, double op2) {
 // when level_compaction_dynamic_level_bytes is true and leveled compaction
 // is used, the base level is not always L1, so precomupted max_file_size can
 // no longer be used. Recompute file_size_for_level from base level.
-uint64_t MaxFileSizeForLevel(const MutableCFOptions& cf_options,
-    int level, CompactionStyle compaction_style, int base_level,
-    bool level_compaction_dynamic_level_bytes) {
+uint64_t MaxFileSizeForLevel(const MutableCFOptions& cf_options, int level,
+                             CompactionStyle compaction_style, int base_level,
+                             bool level_compaction_dynamic_level_bytes) {
   if (!level_compaction_dynamic_level_bytes || level < base_level ||
       compaction_style != kCompactionStyleLevel) {
     assert(level >= 0);
@@ -1142,6 +1144,11 @@ void MutableCFOptions::Dump(Logger* log) const {
                  ttl);
   ROCKS_LOG_INFO(log, "              periodic_compaction_seconds: %" PRIu64,
                  periodic_compaction_seconds);
+  ROCKS_LOG_INFO(log,
+                 "              preclude_last_level_data_seconds: %" PRIu64,
+                 preclude_last_level_data_seconds);
+  ROCKS_LOG_INFO(log, "              preserve_internal_time_seconds: %" PRIu64,
+                 preserve_internal_time_seconds);
   ROCKS_LOG_INFO(log, "                   paranoid_memory_checks: %d",
                  paranoid_memory_checks);
   std::string result;
@@ -1172,6 +1179,8 @@ void MutableCFOptions::Dump(Logger* log) const {
                  bottommost_file_compaction_delay);
   ROCKS_LOG_INFO(log, "                   uncache_aggressiveness: %" PRIu32,
                  uncache_aggressiveness);
+  ROCKS_LOG_INFO(log, "             memtable_op_scan_flush_trigger: %" PRIu32,
+                 memtable_op_scan_flush_trigger);
 
   // Universal Compaction Options
   ROCKS_LOG_INFO(log, "compaction_options_universal.size_ratio : %d",
@@ -1255,4 +1264,22 @@ Status GetStringFromMutableCFOptions(const ConfigOptions& config_options,
   return OptionTypeInfo::SerializeType(
       config_options, cf_mutable_options_type_info, &mutable_opts, opt_string);
 }
+
+#ifndef NDEBUG
+std::vector<std::string> TEST_GetImmutableInMutableCFOptions() {
+  std::vector<std::string> result;
+  for (const auto& opt : cf_mutable_options_type_info) {
+    if (!opt.second.IsMutable()) {
+      result.emplace_back(opt.first);
+    }
+  }
+  if (result.size() > 0) {
+    std::cerr << "Warning: " << result.size() << " immutable options in "
+              << "MutableCFOptions" << std::endl;
+  }
+  return result;
+}
+
+bool TEST_allowSetOptionsImmutableInMutable = false;
+#endif  // !NDEBUG
 }  // namespace ROCKSDB_NAMESPACE
