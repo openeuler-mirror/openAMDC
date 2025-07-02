@@ -2279,6 +2279,10 @@ int processMultibulkBuffer(client *c) {
             addReplyError(c,"Protocol error: invalid multibulk length");
             setProtocolError("invalid mbulk count",c);
             return C_ERR;
+        } else if (ll > 10 && authRequired(c)) {
+            addReplyError(c, "Protocol error: unauthenticated multibulk length");
+            setProtocolError("unauth mbulk count", c);
+            return C_ERR;
         }
 
         c->qb_pos = (newline-c->querybuf)+2;
@@ -2549,11 +2553,11 @@ void processParsedList(client *c, int callFlags) {
         if (c->argc == 0) {
             resetClient(c);
         } else {
-            if (c->argc > 10 && authRequired(c)) {
-                addReplyError(c, "Protocol error: unauthenticated multibulk length");
-                setProtocolError("unauth mbulk count", c);
-                return;
-            }
+            // if (c->argc > 10 && authRequired(c)) {
+            //     addReplyError(c, "Protocol error: unauthenticated multibulk length");
+            //     setProtocolError("unauth mbulk count", c);
+            //     return;
+            // }
             /* Execute the command. */
             if (processCommandAndResetClient(c, callFlags) == C_ERR) {
                 return;
