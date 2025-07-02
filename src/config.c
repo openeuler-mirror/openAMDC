@@ -2207,13 +2207,6 @@ static int isValidAOFfilename(char *val, const char **err) {
     return 1;
 }
 
-static int isValidRocksdbDir(char *val, const char **err) {
-    if (pathIsBaseName(val)) {
-        *err = "rocksdb dir can't be a filename, just a path";
-        return 0;
-    }
-    return 1;
-}
 
 /* Validate specified string is a valid proc-title-template */
 static int isValidProcTitleTemplate(char *val, const char **err) {
@@ -2783,7 +2776,7 @@ standardConfig configs[] = {
     createStringConfig("bgsave_cpulist", NULL, IMMUTABLE_CONFIG, EMPTY_STRING_IS_NULL, server.bgsave_cpulist, NULL, NULL, NULL),
     createStringConfig("ignore-warnings", NULL, MODIFIABLE_CONFIG, ALLOW_EMPTY_STRING, server.ignore_warnings, "", NULL, NULL),
     createStringConfig("proc-title-template", NULL, MODIFIABLE_CONFIG, ALLOW_EMPTY_STRING, server.proc_title_template, CONFIG_DEFAULT_PROC_TITLE_TEMPLATE, isValidProcTitleTemplate, updateProcTitleTemplate),
-    createStringConfig("rocksdb-dir", NULL, IMMUTABLE_CONFIG, ALLOW_EMPTY_STRING, server.rocksdb_dir, ROCKSDB_DIR, isValidRocksdbDir, NULL),
+    createStringConfig("rocksdb-dir", NULL, IMMUTABLE_CONFIG, ALLOW_EMPTY_STRING, server.rocksdb_dir, ROCKSDB_DIR, NULL, NULL),
     
     /* SDS Configs */
     createSDSConfig("masterauth", NULL, MODIFIABLE_CONFIG | SENSITIVE_CONFIG, EMPTY_STRING_IS_NULL, server.masterauth, NULL, NULL, NULL),
@@ -2834,7 +2827,7 @@ standardConfig configs[] = {
     createIntConfig("hz", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.config_hz, CONFIG_DEFAULT_HZ, INTEGER_CONFIG, NULL, updateHZ),
     createIntConfig("min-replicas-to-write", "min-slaves-to-write", MODIFIABLE_CONFIG, 0, INT_MAX, server.repl_min_slaves_to_write, 0, INTEGER_CONFIG, NULL, updateGoodSlaves),
     createIntConfig("min-replicas-max-lag", "min-slaves-max-lag", MODIFIABLE_CONFIG, 0, INT_MAX, server.repl_min_slaves_max_lag, 10, INTEGER_CONFIG, NULL, updateGoodSlaves),
-    createIntConfig("swap-flush-threads-num", NULL, MODIFIABLE_CONFIG, 0, 64, server.swap_flush_threads_num, 0, INTEGER_CONFIG, NULL, updateSwapFlushThreadsNum),
+    createIntConfig("swap-flush-threads-num", NULL, IMMUTABLE_CONFIG, 0, 64, server.swap_flush_threads_num, 0, INTEGER_CONFIG, NULL, updateSwapFlushThreadsNum),
     createIntConfig("swap-data-entry-batch-size", NULL, MODIFIABLE_CONFIG, 1, 64, server.swap_data_entry_batch_size, 4, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("swap-hotmemory-samples", NULL, MODIFIABLE_CONFIG, 1, INT_MAX, server.swap_hotmemory_samples, 5, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("swap-hotmemory-eviction-tenacity", NULL, MODIFIABLE_CONFIG, 0, 100, server.swap_hotmemory_eviction_tenacity, 10, INTEGER_CONFIG, NULL, NULL),
@@ -2842,7 +2835,7 @@ standardConfig configs[] = {
     createIntConfig("rocksdb-max-background-jobs", NULL, IMMUTABLE_CONFIG, 1, 64, server.rocksdb_max_background_jobs, 2, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("rocksdb-max-background-compactions", NULL, IMMUTABLE_CONFIG, 1, 64, server.rocksdb_max_background_compactions, 2, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("rocksdb-max-subcompactions", NULL, IMMUTABLE_CONFIG, 1, 64, server.rocksdb_max_subcompactions, 1, INTEGER_CONFIG, NULL, NULL),
-    createIntConfig("rocksdb-max-background-flushes", NULL, IMMUTABLE_CONFIG, 1, 64, server.rocksdb_max_background_flushes, -1, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("rocksdb-max-background-flushes", NULL, IMMUTABLE_CONFIG, 1, 64, server.rocksdb_max_background_flushes, 1, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("rocksdb-max-open-files", NULL, IMMUTABLE_CONFIG, -1, INT_MAX, server.rocksdb_max_open_files, -1, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("rocksdb-WAL-ttl-seconds", NULL, IMMUTABLE_CONFIG, 0, INT_MAX, server.rocksdb_WAL_ttl_seconds, 18000, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("rocksdb-WAL-size-limit-MB", NULL, IMMUTABLE_CONFIG, 0, INT_MAX, server.rocksdb_WAL_size_limit_MB, 16384, INTEGER_CONFIG, NULL, NULL),

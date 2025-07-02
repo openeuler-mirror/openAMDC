@@ -153,7 +153,7 @@ tags {"aof"} {
     ## Test that openamdc-check-aof indeed sees this AOF is not valid
     test "Short read: Utility should confirm the AOF is not valid" {
         catch {
-            exec src/openamdc-check-aof $aof_path
+            exec src/openamdc-server --check-aof $aof_path
         } result
         assert_match "*not valid*" $result
     }
@@ -165,13 +165,13 @@ tags {"aof"} {
         }
 
         catch {
-            exec src/openamdc-check-aof $aof_path
+            exec src/openamdc-server --check-aof $aof_path
         } result
         assert_match "*ok_up_to_line=8*" $result
     }
 
     test "Short read: Utility should be able to fix the AOF" {
-        set result [exec src/openamdc-check-aof --fix $aof_path << "y\n"]
+        set result [exec src/openamdc-server --check-aof --fix $aof_path << "y\n"]
         assert_match "*Successfully truncated AOF*" $result
     }
 

@@ -155,6 +155,38 @@ start_server {tags {"introspection"}} {
             aof_rewrite_cpulist
             bgsave_cpulist
             set-proc-title
+            swap-enabled
+            swap-flush-threads-num
+            swap-cuckoofilter-bucket-size
+            swap-cuckoofilter-size-for-level
+            rocksdb-max-background-jobs
+            rocksdb-max-background-compactions
+            rocksdb-max-subcompactions
+            rocksdb-max-background-flushes
+            rocksdb-max-open-files
+            rocksdb-WAL-ttl-seconds
+            rocksdb-WAL-size-limit-MB
+            rocksdb-level0-slowdown-writes-trigger
+            rocksdb-blob-garbage-collection-age-cutoff-percentage
+            rocksdb-blob-garbage-collection-force-threshold-percentage
+            rocksdb-max-write-buffer-number
+            rocksdb-max-bytes-for-level-multiplier
+            rocksdb-block-size
+            rocksdb-enable-pipelined-write
+            rocksdb-disable-auto-compactions
+            rocksdb-enable-blob-files
+            rocksdb-enable-blob-garbage-collection
+            rocksdb-compaction-dynamic-level-bytes
+            rocksdb-cache-index-and-filter-blocks
+            rocksdb-max-total-wal-size
+            rocksdb-min-blob-size
+            rocksdb-blob-file-size
+            rocksdb-target-file-size-base
+            rocksdb-write-buffer-size
+            rocksdb-max-bytes-for-level-base
+            rocksdb-block-cache-size
+            rocksdb-dir
+            rocksdb-compression
         }
 
         if {!$::tls} {

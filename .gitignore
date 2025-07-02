@@ -27,6 +27,7 @@ deps/lua/src/lua
 deps/lua/src/luac
 deps/lua/src/liblua.a
 tests/tls/*
+tests/tmp/*
 .make-*
 .prerequisites
 *.dSYM
