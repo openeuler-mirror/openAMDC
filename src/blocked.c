@@ -135,7 +135,7 @@ void queueClientForReprocessing(client *c) {
 /* Unblock a client calling the right function depending on the kind
  * of operation the client is blocking for. */
 void unblockClient(client *c) {
-    WRAPPER_MUTEX_NOCLEANUP_LOCK(cl, &c->lock);
+    WRAPPER_MUTEX_NOCLEANUP_DEFINE(cl, &c->lock);
     serverAssert(threadOwnLock());
     serverAssert(wrapperMutexOwnLock(&cl));
     if (c->btype == BLOCKED_LIST ||
