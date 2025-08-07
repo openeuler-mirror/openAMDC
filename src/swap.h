@@ -102,6 +102,7 @@ void swapPoolPopulate(swapPoolEntry *pool, int dbid, dict *sampledict, dict *key
 
 typedef struct swapThread {
     int id;
+    int exit_flag;
     pthread_t thread_id;
     pthread_mutex_t lock;
     pthread_cond_t cond;
@@ -109,7 +110,7 @@ typedef struct swapThread {
 } swapThread;
 
 void swapThreadInit(void);
-void swapThreadClose(void);
+int swapThreadClose(void);
 
 typedef struct swapState {
     rocks *rocks; /* RocksDB data */

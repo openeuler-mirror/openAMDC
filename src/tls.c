@@ -386,11 +386,12 @@ int tlsConfigure(redisTLSContextConfig *ctx_config) {
         if (!client_ctx) goto error;
     }
     
-    WRAPPER_MUTEX_LOCK(sl, &sslLock);
+    mutexLock(&sslLock);
     SSL_CTX_free(redis_tls_ctx);
     SSL_CTX_free(redis_tls_client_ctx);
     redis_tls_ctx = ctx;
     redis_tls_client_ctx = client_ctx;
+    mutexUnLock(&sslLock);
 
     return C_OK;
 

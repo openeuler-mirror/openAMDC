@@ -686,9 +686,15 @@ void *swapThreadMain(void *arg) {
     /* Infinite loop to continuously process pending entries. */
     while (1) {
         pthread_mutex_lock(&thread->lock);
-        /* Wait until there are pending entries to process. */
-        while (listLength(thread->pending_entries) == 0)
+        /* Wait for new entries to process or for the thread to be flagged for exit. */
+        while (!thread->exit_flag && listLength(thread->pending_entries) == 0)
             pthread_cond_wait(&thread->cond, &thread->lock);
+
+        if (thread->exit_flag) {
+            /* If the thread is flagged for exit, exit the thread. */
+            pthread_mutex_unlock(&thread->lock);
+            return NULL;
+        }
 
         /* Prepare a new processing queue and transfer all pending entries to it. */
         listRewind(thread->pending_entries, &li);
@@ -719,12 +725,13 @@ void *swapThreadMain(void *arg) {
 /* Initializes the swap threads for handling swap operations. */
 void swapThreadInit(void) {
     /* If no swap flush threads are configured, return immediately. */
-    if (server.swap_flush_threads_num == 0) return;
+    if (!server.swap_enabled || server.swap_flush_threads_num == 0) return;
 
     server.swap->swap_threads = zmalloc(sizeof(swapThread) * server.swap_flush_threads_num);
     for (int i = 0; i < server.swap_flush_threads_num; i++) {
         swapThread *thread = server.swap->swap_threads + i;
         thread->id = i;
+        thread->exit_flag = 0;
         thread->pending_entries = listCreate();
 
         /* Initialize the mutex and condition variable for thread synchronization. */
@@ -741,28 +748,60 @@ void swapThreadInit(void) {
             serverLog(LL_WARNING,"Fatal: Can't initialize swapThreadMain.");
             exit(1);
         }
+
+        /* Destroy the thread attributes after they are no longer needed. */
+        pthread_attr_destroy(&tattr);
+        serverLog(LL_NOTICE, "Swap thread %d started", i);
     }
 }
 
 /* Closes and cleans up the swap threads. */
-void swapThreadClose(void) {
+int swapThreadClose(void) {
+    if (!server.swap_enabled) return 0;
+
+    int ret = 0, last_error = 0;
+    int swap_flush_threads_num = server.swap_flush_threads_num;
+    server.swap_flush_threads_num = 0;
+
     /* Iterate through each configured swap thread. */
-    for (int i = 0; i < server.swap_flush_threads_num; i++) {
+    for (int i = 0; i < swap_flush_threads_num; i++) {
         swapThread *thread = server.swap->swap_threads + i;
         /* Skip the current thread if it is calling this function. */
         if (thread->thread_id == pthread_self())
             continue;
-        
-        /* Cancel and join the thread if it is active. */
-        if (thread->thread_id && pthread_cancel(thread->thread_id) == 0) {
-            /* Release the list of pending entries for this thread. */
-            listRelease(thread->pending_entries);
-            /* Wait for the thread to terminate. */
-            pthread_join(thread->thread_id, NULL);
-            /* Log a message indicating the thread has been terminated. */
-            serverLog(LL_WARNING, "Swap thread #%d terminated.", i);
+
+        /* Set the exit flag to indicate that the thread should exit and
+         * broadcast a signal to wake up the thread. */
+        pthread_mutex_lock(&thread->lock);
+        thread->exit_flag = 1;
+        pthread_cond_broadcast(&thread->cond);
+        pthread_mutex_unlock(&thread->lock);
+
+        /* Join the thread with a timeout. */
+        if ((ret = pthread_join(thread->thread_id, NULL)) != 0)  {
+            serverLog(LL_WARNING, "Swap thread #%d: pthread_join timed out. %s", i, strerror(ret));
+            last_error = ret;
+            continue;
         }
+
+        /* Release the list of pending entries for this thread. */
+        listRelease(thread->pending_entries);
+
+        /* Destroy the mutex and condition variable for thread synchronization. */
+        if ((ret = pthread_mutex_destroy(&thread->lock)) != 0) {
+            serverLog(LL_WARNING, "Swap thread #%d: mutex destroy failed. %s", i, strerror(ret));
+            last_error = ret;
+        }
+        if ((ret = pthread_cond_destroy(&thread->cond)) != 0) {
+            serverLog(LL_WARNING, "Swap thread #%d: cond destroy failed. %s", i, strerror(ret));
+            last_error = ret;
+        }
+        serverLog(LL_NOTICE, "Swap thread #%d terminated.", i);
     }
+
+    /* Release the swap threads array. */
+    zfree(server.swap->swap_threads);
+    return last_error;
 }
 
 /* Initializes the swap state. */
