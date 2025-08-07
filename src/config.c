@@ -2328,6 +2328,7 @@ static int updateSwapFlushThreadsNum(long long val, long long prev, const char *
         return 1;
     }
 
+    server.swap_flush_threads_num = prev;
     swapThreadClose();
     server.swap_flush_threads_num = val;
     swapThreadInit();

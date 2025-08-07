@@ -690,12 +690,6 @@ void *swapThreadMain(void *arg) {
         while (!thread->exit_flag && listLength(thread->pending_entries) == 0)
             pthread_cond_wait(&thread->cond, &thread->lock);
 
-        if (thread->exit_flag) {
-            /* If the thread is flagged for exit, exit the thread. */
-            pthread_mutex_unlock(&thread->lock);
-            return NULL;
-        }
-
         /* Prepare a new processing queue and transfer all pending entries to it. */
         listRewind(thread->pending_entries, &li);
         processing_queue = listCreate();
@@ -717,6 +711,11 @@ void *swapThreadMain(void *arg) {
         }
         /* Release the processing queue after all batches have been processed. */
         listRelease(processing_queue);
+
+        /* If the thread is flagged for exit, exit the thread. */
+        if (thread->exit_flag) {
+            break;
+        }
     }
 
     return NULL;
@@ -751,7 +750,7 @@ void swapThreadInit(void) {
 
         /* Destroy the thread attributes after they are no longer needed. */
         pthread_attr_destroy(&tattr);
-        serverLog(LL_NOTICE, "Swap thread %d started", i);
+        serverLog(LL_NOTICE, "Swap thread #%d started", i);
     }
 }
 
