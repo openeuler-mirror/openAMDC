@@ -443,13 +443,17 @@ long long emptyDbStructure(redisDb *dbarray, int dbnum, int async,
     }
 
     for (int j = startdb; j <= enddb; j++) {
-        removed += dictSize(dbarray[j].dict);
+        if (!server.swap_enabled)
+            removed += dictSize(dbarray[j].dict);
         if (async) {
             emptyDbAsync(&dbarray[j]);
         } else {
             dictEmpty(dbarray[j].dict,callback);
             dictEmpty(dbarray[j].expires,callback);
         }
+
+        if (server.swap_enabled)
+            swapFlushAllThread(1);
 
         if (server.swap_enabled && coldDataSize(dbarray[j].id)) {
             sds name;

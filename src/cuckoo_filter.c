@@ -78,6 +78,8 @@ void cuckooFilterFree(cuckooFilter *filter) {
     CUCKOO_FREE(filter->tables);
     filter->tables = NULL;
     filter->numFilters = 0;
+    filter->numItems = 0;
+    filter->numDeletes = 0;
 }
 
 int cuckooFilterClear(cuckooFilter *filter) {
