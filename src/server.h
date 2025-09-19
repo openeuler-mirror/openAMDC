@@ -972,6 +972,7 @@ typedef struct client {
     int bufpos;
     char buf[PROTO_REPLY_CHUNK_BYTES];
 
+    redisAtomic int aysnc_pending_write_handler;
     int async_write_handler_active;
     int async_ops;
     clientReplyBlock *async_reply_block;

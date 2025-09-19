@@ -2043,6 +2043,8 @@ void cronUpdateMemoryStats() {
 void asyncHandleClientsWithPendingWrites(void *var) {
     int depth;
     client *c = var;
+    /* Remove the pending write handler */
+    c->aysnc_pending_write_handler = 0;
     /* Install a write handler for the client to manage future write events */
     clientInstallWriteHandler(c);
     /* Process the pending write tasks for the current thread */
@@ -2072,8 +2074,8 @@ void processAsyncWriteTasks() {
         WRAPPER_MUTEX_LOCK(cl, &c->lock);
         serverAssert(c->async_write_handler_active);
 
-        /*If the client should be closed immediately or after replying, clean up
-         and skip further processing */
+        /* If the client should be closed immediately or after replying, clean up
+         * and skip further processing */
         if (c->flags & (CLIENT_CLOSE_ASAP | CLIENT_CLOSE_AFTER_REPLY)) {
             freePendingAsyncReply(c);
             c->async_write_handler_active = 0;
@@ -2083,17 +2085,20 @@ void processAsyncWriteTasks() {
         /* Handle the client's asynchronous reply buffer, moving data as needed */
         handleAsyncReplyBuffer(c);
 
+        /* Mark the client's async write handler as inactive */
         c->async_write_handler_active = 0;
 
-        /* Check and potentially close the client if its output buffer exceeds the limit */
-        closeClientOnOutputBufferLimitReached(c, 1);
-        
-        if (c->flags & CLIENT_CLOSE_ASAP)
+        /* If the client is not a slave or it is a slave but it is not yet online */
+        if (!(c->replstate == REPL_STATE_NONE ||
+            (c->replstate == SLAVE_STATE_ONLINE && !c->repl_put_online_on_ack)))
             continue;
 
         /* Schedule the next async operation for the client, asserting it was successful */
-        int res = clientAsyncFuntion(c, asyncHandleClientsWithPendingWrites, 0);  
-        serverAssert(res == AE_OK);
+        if (!c->aysnc_pending_write_handler) {
+            c->aysnc_pending_write_handler = 1;
+            int res = clientAsyncFuntion(c, asyncHandleClientsWithPendingWrites, 0);
+            if (res == AE_ERR) c->aysnc_pending_write_handler = 0;
+        }
     }
 }
 
@@ -2900,8 +2905,12 @@ void initServerConfig(void) {
 
     /* Client Pause related */
     server.client_pause_type = CLIENT_PAUSE_OFF;
-    server.client_pause_end_time = 0;   
+    server.client_pause_end_time = 0;
 
+    /* Lock init */
+    mutexInit(&asyncFreeQueueLock, skipLock, "async free queue lock");
+    mutexInit(&expireLock, skipLock, "expire lock");
+    
     initConfigValues();
 }
 

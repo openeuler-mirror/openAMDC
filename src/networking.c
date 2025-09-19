@@ -193,6 +193,7 @@ client *createClient(connection *conn, int iel) {
     c->auth_module = NULL;
     listSetFreeMethod(c->pubsub_patterns,decrRefCountVoid);
     listSetMatchMethod(c->pubsub_patterns,listMatchObjects);
+    c->aysnc_pending_write_handler = 0;
     c->async_write_handler_active = 0;
     c->async_ops = 0;
     c->async_reply_block = NULL;
@@ -1894,13 +1895,16 @@ int writeToClient(client *c, int handler_installed) {
     /* Update total number of writes on server */
     atomicIncr(server.stat_total_writes_processed, 1);
 
+    int depth;
     ssize_t nwritten = 0, totwritten = 0;
     size_t objlen;
     clientReplyBlock *o;
 
     while(clientHasPendingReplies(c)) {
         if (c->bufpos > 0) {
+            WRAPPER_MUTEX_UNLOCK(&cl, depth);
             nwritten = connWrite(c->conn,c->buf+c->sentlen,c->bufpos-c->sentlen);
+            WRAPPER_MUTEX_RELOCK(&cl, depth);
             if (nwritten <= 0) break;
             c->sentlen += nwritten;
             totwritten += nwritten;
@@ -1921,7 +1925,9 @@ int writeToClient(client *c, int handler_installed) {
                 continue;
             }
 
+            WRAPPER_MUTEX_UNLOCK(&cl, depth);
             nwritten = connWrite(c->conn, o->buf + c->sentlen, objlen - c->sentlen);
+            WRAPPER_MUTEX_RELOCK(&cl, depth);
             if (nwritten <= 0) break;
             c->sentlen += nwritten;
             totwritten += nwritten;

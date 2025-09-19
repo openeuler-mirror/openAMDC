@@ -15,6 +15,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <stdint.h>
 #include <pthread.h>
 
 typedef int (mutexSkipLock)(void);
@@ -32,6 +33,27 @@ do { \
     for (int i = 0; i < (depth); i++) mutexLock(m); \
 } while (0)
 
+
+#ifdef USE_SPINLOCK
+
+struct mutex {
+    char *name;
+    int depth;
+    pthread_t owner;
+    uint16_t serving;
+    uint16_t next;
+    mutexSkipLock *skipLock;
+};
+
+int mutexInit(struct mutex *m, mutexSkipLock *skipLock, char *name);
+int mutexLock(struct mutex *m);
+int mutexTryLock(struct mutex *m);
+int mutexUnlock(struct mutex *m);
+int mutexDestroy(struct mutex *m);
+int mutexOwnLock(struct mutex *m);
+
+#else
+
 struct mutex {
     char *name;
     int depth;
@@ -47,6 +69,8 @@ int mutexTryLock(struct mutex *m);
 int mutexUnlock(struct mutex *m);
 int mutexDestroy(struct mutex *m);
 int mutexOwnLock(struct mutex *m);
+
+#endif
 
 struct wrapperMutex {
     struct mutex *lock;

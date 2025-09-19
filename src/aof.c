@@ -693,6 +693,7 @@ struct client *createAOFClient(void) {
     c->original_argv = NULL;
     c->argv_len_sum = 0;
     c->bufpos = 0;
+    c->aysnc_pending_write_handler = 0;
     c->async_write_handler_active = 0;
     c->async_ops = 0;
 
