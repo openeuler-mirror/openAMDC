@@ -40,8 +40,7 @@ struct mutex {
     char *name;
     int depth;
     pthread_t owner;
-    uint16_t serving;
-    uint16_t next;
+    pthread_spinlock_t mutex;
     mutexSkipLock *skipLock;
 };
 
