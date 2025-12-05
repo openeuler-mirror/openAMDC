@@ -265,6 +265,7 @@ endif
 	FINAL_LIBS += ../deps/hiredis/libhiredis_ssl.a $(LIBSSL_LIBS) $(LIBCRYPTO_LIBS)
 endif
 
+USE_SPINLOCK=yes
 ifeq ($(USE_SPINLOCK),yes)
 	FINAL_CFLAGS+=-DUSE_SPINLOCK
 endif
