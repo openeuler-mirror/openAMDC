@@ -1668,6 +1668,7 @@ long long getInstantaneousMetric(int metric) {
  *
  * The function always returns 0 as it never terminates the client. */
 int clientsCronResizeQueryBuffer(client *c) {
+    WRAPPER_MUTEX_LOCK(cl, &c->lock);
     size_t querybuf_size = sdsAllocSize(c->querybuf);
     time_t idletime = server.unixtime - c->lastinteraction;
 
@@ -1724,6 +1725,7 @@ size_t ClientsPeakMemInput[CLIENTS_PEAK_MEM_USAGE_SLOTS] = {0};
 size_t ClientsPeakMemOutput[CLIENTS_PEAK_MEM_USAGE_SLOTS] = {0};
 
 int clientsCronTrackExpansiveClients(client *c, int time_idx) {
+    WRAPPER_MUTEX_LOCK(cl, &c->lock);
     size_t in_usage = sdsZmallocSize(c->querybuf) + c->argv_len_sum +
 	              (c->argv ? zmalloc_size(c->argv) : 0);
     size_t out_usage = getClientOutputBufferMemoryUsage(c);
@@ -1741,6 +1743,7 @@ int clientsCronTrackExpansiveClients(client *c, int time_idx) {
  * to the second) total memory used by clients using clinetsCron() in
  * a more incremental way (depending on server.hz). */
 int clientsCronTrackClientsMemUsage(client *c) {
+    WRAPPER_MUTEX_LOCK(cl, &c->lock);
     size_t mem = 0;
     int type = getClientType(c);
     mem += getClientOutputBufferMemoryUsage(c);
@@ -2044,7 +2047,7 @@ void asyncHandleClientsWithPendingWrites(void *var) {
     int depth;
     client *c = var;
     /* Remove the pending write handler */
-    c->aysnc_pending_write_handler = 0;
+    c->aysnc_pending_write_handler--;
     /* Install a write handler for the client to manage future write events */
     clientInstallWriteHandler(c);
     /* Process the pending write tasks for the current thread */
@@ -2094,10 +2097,10 @@ void processAsyncWriteTasks() {
             continue;
 
         /* Schedule the next async operation for the client, asserting it was successful */
-        if (!c->aysnc_pending_write_handler) {
-            c->aysnc_pending_write_handler = 1;
+        if (c->aysnc_pending_write_handler < LIMIT_ASYNC_WRITE_TASK) {
+            c->aysnc_pending_write_handler++;
             int res = clientAsyncFuntion(c, asyncHandleClientsWithPendingWrites, 0);
-            if (res == AE_ERR) c->aysnc_pending_write_handler = 0;
+            if (res == AE_ERR) c->aysnc_pending_write_handler--;
         }
     }
 }

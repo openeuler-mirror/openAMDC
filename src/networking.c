@@ -347,7 +347,7 @@ int parseClientCommandBuffer(client *c, int callFlags) {
     }
     
     /* Avoid data backlog in the receive buffer. */
-    if (server.worker_threads_num == 1 && c->multibulklen == 0)
+    if (server.worker_threads_num == 1)
         processParsedList(c, callFlags);
 
     /* Trim to pos */
@@ -2429,7 +2429,7 @@ void commandProcessed(client *c, int callFlags) {
      * part of the replication stream, will be propagated to the
      * sub-replicas and to the replication backlog. */
     if (c->flags & CLIENT_MASTER) {
-        WRAPPER_MUTEX_LOCK(gl, &globalLock);
+        WRAPPER_MUTEX_LOCK(cl, &c->lock);
         long long applied = c->reploff - prev_offset;
         if (applied) {
             replicationFeedSlavesFromMasterStream(server.slaves,
@@ -3668,6 +3668,7 @@ char *getClientTypeName(int class) {
  * Return value: non-zero if the client reached the soft or the hard limit.
  *               Otherwise zero is returned. */
 int checkClientOutputBufferLimits(client *c) {
+    WRAPPER_MUTEX_LOCK(cl, &c->lock);
     int soft = 0, hard = 0, class;
     unsigned long used_mem = getClientOutputBufferMemoryUsage(c);
 
