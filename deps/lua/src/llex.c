@@ -138,6 +138,7 @@ static void inclinenumber (LexState *ls) {
 
 
 void luaX_setinput (lua_State *L, LexState *ls, ZIO *z, TString *source) {
+  ls->t.token = 0;
   ls->decpoint = '.';
   ls->L = L;
   ls->lookahead.token = TK_EOS;  /* no look-ahead token */
