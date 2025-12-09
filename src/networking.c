@@ -3904,8 +3904,6 @@ void processEventsWhileBlocked(int iel) {
             if (!events) break;
         }
 
-        whileBlockedCron();
-
         ProcessingEventsWhileBlocked = 0;
     }
 
@@ -3916,6 +3914,8 @@ void processEventsWhileBlocked(int iel) {
         WRAPPER_MUTEX_NOCLEANUP_LOCK(cl, &c->lock);
     }
     listRelease(clients);
+
+    whileBlockedCron();
 }
 
 parsed *parsedCreate(int argc) {
