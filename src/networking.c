@@ -346,9 +346,11 @@ int parseClientCommandBuffer(client *c, int callFlags) {
         c->bulklen = -1;
     }
     
-    /* Avoid data backlog in the receive buffer. */
-    if (server.worker_threads_num == 1)
+    /* Process the parsed list if the worker thread num is 1 or the client is a master node */
+    if (server.worker_threads_num == 1 || c->flags & CLIENT_MASTER) {
+        WRAPPER_MUTEX_LOCK(gl, &globalLock);
         processParsedList(c, callFlags);
+    }
 
     /* Trim to pos */
     if (c->qb_pos) {

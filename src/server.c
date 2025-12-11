@@ -2243,7 +2243,7 @@ next:
    
     /* Check if the current thread is not the main thread, skip it. */
     if (threadId != MAIN_THREAD_ID)
-        goto end;
+        goto keep;
 
     /* Start a scheduled AOF rewrite if this was requested by the user while
      * a BGSAVE was in progress. */
@@ -2303,7 +2303,6 @@ next:
      * call this function when need. */
     updateDictResizePolicy();
 
-
     /* AOF postponed flush: Try at every cron cycle if the slow fsync
      * completed. */
     if (server.aof_state == AOF_ON && server.aof_flush_postponed_start)
@@ -2321,6 +2320,7 @@ next:
     /* Clear the paused clients state if needed. */
     checkClientPauseTimeoutAndReturnIfPaused();
 
+keep:
     /* Replication cron function -- used to reconnect to master,
      * detect transfer failures, start background RDB transfers and so forth. 
      * 
@@ -2331,6 +2331,10 @@ next:
     } else {
         run_with_period(1000) replicationCron();
     }
+
+    /* Check if the current thread is not the main thread, skip it. */
+    if (threadId != MAIN_THREAD_ID)
+        goto end;
 
     /* Run the openAMDC Cluster cron. */
     run_with_period(100) {
@@ -2371,7 +2375,7 @@ next:
 
     /* Fire the cron loop modules event. */
     RedisModuleCronLoopV1 ei = {REDISMODULE_CRON_LOOP_VERSION,server.hz};
-    moduleFireServerEvent(REDISMODULE_EVENT_CRON_LOOP, 0, &ei);;
+    moduleFireServerEvent(REDISMODULE_EVENT_CRON_LOOP, 0, &ei);
 
 end:
     if (threadId == MAIN_THREAD_ID)

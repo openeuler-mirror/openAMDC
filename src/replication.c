@@ -3410,14 +3410,11 @@ void replicationCron(void) {
 
     /* Check failover status first, to see if we need to start
      * handling the failover. */
-    updateFailoverStatus();
+    if (threadId == MAIN_THREAD_ID)
+        updateFailoverStatus();
 
-    {
-        WRAPPER_MUTEX_DEFINE(cl);
-        if (server.master) {
-            cl.lock = &server.master->lock;
-            wrapperMutexLock(&cl);
-        }
+    if (server.masterhost && server.master->iel == threadId) {
+        WRAPPER_MUTEX_LOCK(cl, &server.master->lock);
 
         /* Non blocking connection timeout? */
         if (server.masterhost &&
@@ -3459,154 +3456,157 @@ void replicationCron(void) {
             !(server.master->flags & CLIENT_PRE_PSYNC))
             replicationSendAck();
     }
-    /* If we have attached slaves, PING them from time to time.
-     * So slaves can implement an explicit timeout to masters, and will
-     * be able to detect a link disconnection even if the TCP connection
-     * will not actually go down. */
-    listIter li;
-    listNode *ln;
-    robj *ping_argv[1];
 
-    /* First, send PING according to ping_slave_period. */
-    if ((replication_cron_loops % server.repl_ping_slave_period) == 0 &&
-        listLength(server.slaves))
-    {
-        /* Note that we don't send the PING if the clients are paused during
-         * a openAMDC Cluster manual failover: the PING we send will otherwise
-         * alter the replication offsets of master and slave, and will no longer
-         * match the one stored into 'mf_master_offset' state. */
-        int manual_failover_in_progress =
-            ((server.cluster_enabled &&
-              server.cluster->mf_end) ||
-            server.failover_end_time) &&
-            checkClientPauseTimeoutAndReturnIfPaused();
-
-        if (!manual_failover_in_progress) {
-            ping_argv[0] = shared.ping;
-            replicationFeedSlaves(server.slaves, server.slaveseldb,
-                ping_argv, 1);
-        }
-    }
-
-    /* Second, send a newline to all the slaves in pre-synchronization
-     * stage, that is, slaves waiting for the master to create the RDB file.
-     *
-     * Also send the a newline to all the chained slaves we have, if we lost
-     * connection from our master, to keep the slaves aware that their
-     * master is online. This is needed since sub-slaves only receive proxied
-     * data from top-level masters, so there is no explicit pinging in order
-     * to avoid altering the replication offsets. This special out of band
-     * pings (newlines) can be sent, they will have no effect in the offset.
-     *
-     * The newline will be ignored by the slave but will refresh the
-     * last interaction timer preventing a timeout. In this case we ignore the
-     * ping period and refresh the connection once per second since certain
-     * timeouts are set at a few seconds (example: PSYNC response). */
-    listRewind(server.slaves,&li);
-    while((ln = listNext(&li))) {
-        client *slave = ln->value;
-
-        int is_presync =
-            (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_START ||
-            (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_END &&
-             server.rdb_child_type != RDB_CHILD_TYPE_SOCKET));
-
-        if (is_presync) {
-            connWrite(slave->conn, "\n", 1);
-        }
-    }
-
-    /* Disconnect timedout slaves. */
-    if (listLength(server.slaves)) {
+    if (threadId == MAIN_THREAD_ID) {
+        /* If we have attached slaves, PING them from time to time.
+        * So slaves can implement an explicit timeout to masters, and will
+        * be able to detect a link disconnection even if the TCP connection
+        * will not actually go down. */
         listIter li;
         listNode *ln;
+        robj *ping_argv[1];
 
+        /* First, send PING according to ping_slave_period. */
+        if ((replication_cron_loops % server.repl_ping_slave_period) == 0 &&
+            listLength(server.slaves))
+        {
+            /* Note that we don't send the PING if the clients are paused during
+            * a openAMDC Cluster manual failover: the PING we send will otherwise
+            * alter the replication offsets of master and slave, and will no longer
+            * match the one stored into 'mf_master_offset' state. */
+            int manual_failover_in_progress =
+                ((server.cluster_enabled &&
+                server.cluster->mf_end) ||
+                server.failover_end_time) &&
+                checkClientPauseTimeoutAndReturnIfPaused();
+
+            if (!manual_failover_in_progress) {
+                ping_argv[0] = shared.ping;
+                replicationFeedSlaves(server.slaves, server.slaveseldb,
+                    ping_argv, 1);
+            }
+        }
+
+        /* Second, send a newline to all the slaves in pre-synchronization
+        * stage, that is, slaves waiting for the master to create the RDB file.
+        *
+        * Also send the a newline to all the chained slaves we have, if we lost
+        * connection from our master, to keep the slaves aware that their
+        * master is online. This is needed since sub-slaves only receive proxied
+        * data from top-level masters, so there is no explicit pinging in order
+        * to avoid altering the replication offsets. This special out of band
+        * pings (newlines) can be sent, they will have no effect in the offset.
+        *
+        * The newline will be ignored by the slave but will refresh the
+        * last interaction timer preventing a timeout. In this case we ignore the
+        * ping period and refresh the connection once per second since certain
+        * timeouts are set at a few seconds (example: PSYNC response). */
         listRewind(server.slaves,&li);
         while((ln = listNext(&li))) {
             client *slave = ln->value;
 
-            if (slave->replstate == SLAVE_STATE_ONLINE) {
-                if (slave->flags & CLIENT_PRE_PSYNC)
-                    continue;
-                if ((server.unixtime - slave->repl_ack_time) > server.repl_timeout) {
-                    serverLog(LL_WARNING, "Disconnecting timedout replica (streaming sync): %s",
-                          replicationGetSlaveName(slave));
-                    freeClientAsync(slave);
-                    continue;
-                }
+            int is_presync =
+                (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_START ||
+                (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_END &&
+                server.rdb_child_type != RDB_CHILD_TYPE_SOCKET));
+
+            if (is_presync) {
+                connWrite(slave->conn, "\n", 1);
             }
-            /* We consider disconnecting only diskless replicas because disk-based replicas aren't fed
-             * by the fork child so if a disk-based replica is stuck it doesn't prevent the fork child
-             * from terminating. */
-            if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_END && server.rdb_child_type == RDB_CHILD_TYPE_SOCKET) {
-                if (slave->repl_last_partial_write != 0 &&
-                    (server.unixtime - slave->repl_last_partial_write) > server.repl_timeout)
-                {
-                    serverLog(LL_WARNING, "Disconnecting timedout replica (full sync): %s",
-                          replicationGetSlaveName(slave));
-                    freeClientAsync(slave);
-                    continue;
+        }
+
+        /* Disconnect timedout slaves. */
+        if (listLength(server.slaves)) {
+            listIter li;
+            listNode *ln;
+
+            listRewind(server.slaves,&li);
+            while((ln = listNext(&li))) {
+                client *slave = ln->value;
+
+                if (slave->replstate == SLAVE_STATE_ONLINE) {
+                    if (slave->flags & CLIENT_PRE_PSYNC)
+                        continue;
+                    if ((server.unixtime - slave->repl_ack_time) > server.repl_timeout) {
+                        serverLog(LL_WARNING, "Disconnecting timedout replica (streaming sync): %s",
+                            replicationGetSlaveName(slave));
+                        freeClientAsync(slave);
+                        continue;
+                    }
+                }
+                /* We consider disconnecting only diskless replicas because disk-based replicas aren't fed
+                * by the fork child so if a disk-based replica is stuck it doesn't prevent the fork child
+                * from terminating. */
+                if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_END && server.rdb_child_type == RDB_CHILD_TYPE_SOCKET) {
+                    if (slave->repl_last_partial_write != 0 &&
+                        (server.unixtime - slave->repl_last_partial_write) > server.repl_timeout)
+                    {
+                        serverLog(LL_WARNING, "Disconnecting timedout replica (full sync): %s",
+                            replicationGetSlaveName(slave));
+                        freeClientAsync(slave);
+                        continue;
+                    }
                 }
             }
         }
-    }
 
-    /* If this is a master without attached slaves and there is a replication
-     * backlog active, in order to reclaim memory we can free it after some
-     * (configured) time. Note that this cannot be done for slaves: slaves
-     * without sub-slaves attached should still accumulate data into the
-     * backlog, in order to reply to PSYNC queries if they are turned into
-     * masters after a failover. */
-    if (listLength(server.slaves) == 0 && server.repl_backlog_time_limit &&
-        server.repl_backlog && server.masterhost == NULL)
-    {
-        time_t idle = server.unixtime - server.repl_no_slaves_since;
+        /* If this is a master without attached slaves and there is a replication
+        * backlog active, in order to reclaim memory we can free it after some
+        * (configured) time. Note that this cannot be done for slaves: slaves
+        * without sub-slaves attached should still accumulate data into the
+        * backlog, in order to reply to PSYNC queries if they are turned into
+        * masters after a failover. */
+        if (listLength(server.slaves) == 0 && server.repl_backlog_time_limit &&
+            server.repl_backlog && server.masterhost == NULL)
+        {
+            time_t idle = server.unixtime - server.repl_no_slaves_since;
 
-        if (idle > server.repl_backlog_time_limit) {
-            /* When we free the backlog, we always use a new
-             * replication ID and clear the ID2. This is needed
-             * because when there is no backlog, the master_repl_offset
-             * is not updated, but we would still retain our replication
-             * ID, leading to the following problem:
-             *
-             * 1. We are a master instance.
-             * 2. Our slave is promoted to master. It's repl-id-2 will
-             *    be the same as our repl-id.
-             * 3. We, yet as master, receive some updates, that will not
-             *    increment the master_repl_offset.
-             * 4. Later we are turned into a slave, connect to the new
-             *    master that will accept our PSYNC request by second
-             *    replication ID, but there will be data inconsistency
-             *    because we received writes. */
-            changeReplicationId();
-            clearReplicationId2();
-            freeReplicationBacklog();
-            serverLog(LL_NOTICE,
-                "Replication backlog freed after %d seconds "
-                "without connected replicas.",
-                (int) server.repl_backlog_time_limit);
+            if (idle > server.repl_backlog_time_limit) {
+                /* When we free the backlog, we always use a new
+                * replication ID and clear the ID2. This is needed
+                * because when there is no backlog, the master_repl_offset
+                * is not updated, but we would still retain our replication
+                * ID, leading to the following problem:
+                *
+                * 1. We are a master instance.
+                * 2. Our slave is promoted to master. It's repl-id-2 will
+                *    be the same as our repl-id.
+                * 3. We, yet as master, receive some updates, that will not
+                *    increment the master_repl_offset.
+                * 4. Later we are turned into a slave, connect to the new
+                *    master that will accept our PSYNC request by second
+                *    replication ID, but there will be data inconsistency
+                *    because we received writes. */
+                changeReplicationId();
+                clearReplicationId2();
+                freeReplicationBacklog();
+                serverLog(LL_NOTICE,
+                    "Replication backlog freed after %d seconds "
+                    "without connected replicas.",
+                    (int) server.repl_backlog_time_limit);
+            }
         }
+
+        /* If AOF is disabled and we no longer have attached slaves, we can
+        * free our Replication Script Cache as there is no need to propagate
+        * EVALSHA at all. */
+        if (listLength(server.slaves) == 0 &&
+            server.aof_state == AOF_OFF &&
+            listLength(server.repl_scriptcache_fifo) != 0)
+        {
+            replicationScriptCacheFlush();
+        }
+
+        replicationStartPendingFork();
+
+        /* Remove the RDB file used for replication if openAMDC is not running
+        * with any persistence. */
+        removeRDBUsedToSyncReplicas();
+
+        /* Refresh the number of slaves with lag <= min-slaves-max-lag. */
+        refreshGoodSlavesCount();
+        replication_cron_loops++; /* Incremented with frequency 1 HZ. */
     }
-
-    /* If AOF is disabled and we no longer have attached slaves, we can
-     * free our Replication Script Cache as there is no need to propagate
-     * EVALSHA at all. */
-    if (listLength(server.slaves) == 0 &&
-        server.aof_state == AOF_OFF &&
-        listLength(server.repl_scriptcache_fifo) != 0)
-    {
-        replicationScriptCacheFlush();
-    }
-
-    replicationStartPendingFork();
-
-    /* Remove the RDB file used for replication if openAMDC is not running
-     * with any persistence. */
-    removeRDBUsedToSyncReplicas();
-
-    /* Refresh the number of slaves with lag <= min-slaves-max-lag. */
-    refreshGoodSlavesCount();
-    replication_cron_loops++; /* Incremented with frequency 1 HZ. */
 }
 
 void replicationStartPendingFork(void) {
