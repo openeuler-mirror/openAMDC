@@ -3413,48 +3413,58 @@ void replicationCron(void) {
     if (threadId == MAIN_THREAD_ID)
         updateFailoverStatus();
 
-    if (server.masterhost && server.master->iel == threadId) {
-        WRAPPER_MUTEX_LOCK(cl, &server.master->lock);
-
-        /* Non blocking connection timeout? */
-        if (server.masterhost &&
-            (server.repl_state == REPL_STATE_CONNECTING ||
-            slaveIsInHandshakeState()) &&
-            (time(NULL)-server.repl_transfer_lastio) > server.repl_timeout)
-        {
+    /* Non blocking connection timeout? */
+    if (server.masterhost &&
+        (server.repl_state == REPL_STATE_CONNECTING ||
+        slaveIsInHandshakeState()) &&
+        (time(NULL)-server.repl_transfer_lastio) > server.repl_timeout)
+    {
+        if (threadId == MAIN_THREAD_ID) {
             serverLog(LL_WARNING,"Timeout connecting to the MASTER...");
             cancelReplicationHandshake(1);
         }
+    }
 
-        /* Bulk transfer I/O timeout? */
-        if (server.masterhost && server.repl_state == REPL_STATE_TRANSFER &&
-            (time(NULL)-server.repl_transfer_lastio) > server.repl_timeout)
-        {
-            serverLog(LL_WARNING,"Timeout receiving bulk data from MASTER... If the problem persists try to set the 'repl-timeout' parameter in openamdc.conf to a larger value.");
+    /* Bulk transfer I/O timeout? */
+    if (server.masterhost && server.repl_state == REPL_STATE_TRANSFER &&
+        (time(NULL)-server.repl_transfer_lastio) > server.repl_timeout)
+    {
+        if (threadId == MAIN_THREAD_ID) {
+            serverLog(LL_WARNING,"Timeout receiving bulk data from MASTER... If the problem persists try to set the 'repl-timeout' parameter in amdc.yaml to a larger value.");
             cancelReplicationHandshake(1);
         }
+    }
 
-        /* Timed out master when we are an already connected slave? */
-        if (server.masterhost && server.repl_state == REPL_STATE_CONNECTED &&
-            (time(NULL)-server.master->lastinteraction) > server.repl_timeout)
-        {
-            serverLog(LL_WARNING,"MASTER timeout: no data nor PING received...");
-            disconnectMaster(&server.master);
+    /* Timed out master when we are an already connected slave? */
+    if (server.masterhost && server.repl_state == REPL_STATE_CONNECTED) {
+        WRAPPER_MUTEX_LOCK(cl, &server.master->lock);
+        if (server.master->iel == threadId) {
+            if ((time(NULL)-server.master->lastinteraction) > server.repl_timeout)
+            {
+                serverLog(LL_WARNING,"MASTER timeout: no data nor PING received...");
+                disconnectMaster(&server.master);
+            }
         }
+    }
 
-        /* Check if we should connect to a MASTER */
-        if (server.repl_state == REPL_STATE_CONNECT) {
+    /* Check if we should connect to a MASTER */
+    if (server.repl_state == REPL_STATE_CONNECT) {
+        if (threadId == MAIN_THREAD_ID) {
             serverLog(LL_NOTICE,"Connecting to MASTER %s:%d",
                 server.masterhost, server.masterport);
             connectWithMaster();
         }
+    }
 
-        /* Send ACK to master from time to time.
-        * Note that we do not send periodic acks to masters that don't
-        * support PSYNC and replication offsets. */
-        if (server.masterhost && server.master &&
-            !(server.master->flags & CLIENT_PRE_PSYNC))
-            replicationSendAck();
+    /* Send ACK to master from time to time.
+     * Note that we do not send periodic acks to masters that don't
+     * support PSYNC and replication offsets. */
+    if (server.masterhost && server.master) {
+        WRAPPER_MUTEX_LOCK(cl, &server.master->lock);
+        if (server.master->iel == threadId) {
+            if (!(server.master->flags & CLIENT_PRE_PSYNC))
+                replicationSendAck();
+        }
     }
 
     if (threadId == MAIN_THREAD_ID) {
