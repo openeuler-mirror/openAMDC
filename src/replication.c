@@ -3437,8 +3437,8 @@ void replicationCron(void) {
 
     /* Timed out master when we are an already connected slave? */
     if (server.masterhost && server.repl_state == REPL_STATE_CONNECTED) {
-        WRAPPER_MUTEX_LOCK(cl, &server.master->lock);
         if (server.master->iel == threadId) {
+            WRAPPER_MUTEX_LOCK(cl, &server.master->lock);
             if ((time(NULL)-server.master->lastinteraction) > server.repl_timeout)
             {
                 serverLog(LL_WARNING,"MASTER timeout: no data nor PING received...");
@@ -3460,8 +3460,8 @@ void replicationCron(void) {
      * Note that we do not send periodic acks to masters that don't
      * support PSYNC and replication offsets. */
     if (server.masterhost && server.master) {
-        WRAPPER_MUTEX_LOCK(cl, &server.master->lock);
         if (server.master->iel == threadId) {
+            WRAPPER_MUTEX_LOCK(cl, &server.master->lock);
             if (!(server.master->flags & CLIENT_PRE_PSYNC))
                 replicationSendAck();
         }
