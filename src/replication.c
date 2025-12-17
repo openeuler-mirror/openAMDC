@@ -131,7 +131,13 @@ void resizeReplicationBacklog(long long newsize) {
 
 void freeReplicationBacklog(void) {
     serverAssert(threadOwnLock());
-    serverAssert(listLength(server.slaves) == 0);
+    listIter li;
+    listNode *ln;
+    listRewind(server.slaves, &li);
+    while ((ln = listNext(&li))) {
+        client *c = ln->value;
+        serverAssert(c->flags & CLIENT_CLOSE_ASAP);
+    }
     zfree(server.repl_backlog);
     server.repl_backlog = NULL;
 }
