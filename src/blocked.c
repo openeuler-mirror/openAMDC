@@ -205,8 +205,8 @@ void disconnectAllBlockedClients(void) {
     listRewind(server.clients,&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
-        WRAPPER_MUTEX_LOCK(cl, &c->lock);
         if (c->flags & CLIENT_BLOCKED) {
+            WRAPPER_MUTEX_LOCK(cl, &c->lock);
             /* PAUSED clients are an exception, when they'll be unblocked, the
              * command processing will start from scratch, and the command will
              * be either executed or rejected. (unlike LIST blocked clients for

@@ -1786,7 +1786,6 @@ void freeClientAsync(client *c) {
      * may access the list while openAMDC uses I/O threads. All the other accesses
      * are in the context of the main thread while the other threads are
      * idle. */
-    WRAPPER_MUTEX_LOCK(cl, &c->lock);
     if (c->flags & CLIENT_CLOSE_ASAP || c->flags & CLIENT_LUA) return;
     c->flags |= CLIENT_CLOSE_ASAP;
     WRAPPER_MUTEX_LOCK(al, &asyncFreeQueueLock);
